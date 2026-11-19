@@ -15,6 +15,9 @@ const { withAppBuildGradle, withProjectBuildGradle } = require('expo/config-plug
 
 const MARKER = '// vitasense: short native build folders';
 const OBJECT_PATH_MAX = 240;
+// The app module's object folders carry an extra prefix (<library>_autolinked_build/CMakeFiles/...), and release
+// builds add "RelWithDebInfo" to the path, so it needs a little more room before CMake can hash a long name.
+const APP_OBJECT_PATH_MAX = 250;
 
 const ROOT_SNIPPET = `
 ${MARKER} (plugins/with-short-native-build-paths.js)
@@ -48,7 +51,7 @@ if (System.getProperty('os.name').toLowerCase().contains('windows')) {
     defaultConfig {
       externalNativeBuild {
         cmake {
-          arguments "-DCMAKE_OBJECT_PATH_MAX=${OBJECT_PATH_MAX}"
+          arguments "-DCMAKE_OBJECT_PATH_MAX=${APP_OBJECT_PATH_MAX}"
         }
       }
     }

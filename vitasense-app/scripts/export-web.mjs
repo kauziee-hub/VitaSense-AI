@@ -10,7 +10,8 @@
  *   reference in the bundle is rewritten.
  * - The Android release APK (android/app/build/outputs/apk/release/app-release.apk, or ANDROID_APK)
  *   is copied to dist/downloads/VitaSense.apk, where the website's download buttons point.
- * - dist/.vercel (the Vercel project link) survives rebuilds.
+ * - The Vercel project link lives in .vercel/ (gitignored) and is copied into dist/ for the deploy, because
+ *   `expo export` empties dist/ on every run.
  */
 import { execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -19,12 +20,7 @@ import { join } from 'node:path';
 const DIST = 'dist';
 const deploy = process.argv.includes('--deploy');
 
-// Clear dist but keep the Vercel link.
-if (existsSync(DIST)) {
-  for (const entry of readdirSync(DIST)) {
-    if (entry !== '.vercel') rmSync(join(DIST, entry), { recursive: true, force: true });
-  }
-}
+rmSync(DIST, { recursive: true, force: true });
 
 execSync('npx expo export --platform web --output-dir dist', { stdio: 'inherit', env: process.env });
 
@@ -61,5 +57,10 @@ if (existsSync(apk)) {
 }
 
 if (deploy) {
+  if (!existsSync(join('.vercel', 'project.json'))) {
+    console.error('No Vercel link in .vercel/. Run `vercel link --project vitasense` in vitasense-app first.');
+    process.exit(1);
+  }
+  cpSync('.vercel', join(DIST, '.vercel'), { recursive: true });
   execSync('vercel deploy --prod --yes', { cwd: DIST, stdio: 'inherit' });
 }
