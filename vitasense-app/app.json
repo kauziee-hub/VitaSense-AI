@@ -1,0 +1,113 @@
+{
+  "expo": {
+    "name": "VitaSense",
+    "slug": "vitasense",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "vitasense",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "ai.vitasense.app",
+      "buildNumber": "1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#111111",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "ai.vitasense.app",
+      "versionCode": 1,
+      "allowBackup": false,
+      "permissions": [
+        "android.permission.health.READ_SLEEP",
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.READ_DISTANCE",
+        "android.permission.health.READ_EXERCISE",
+        "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+        "android.permission.health.READ_HEART_RATE",
+        "android.permission.health.READ_RESTING_HEART_RATE",
+        "android.permission.health.READ_HEART_RATE_VARIABILITY",
+        "android.permission.health.READ_OXYGEN_SATURATION",
+        "android.permission.health.READ_RESPIRATORY_RATE",
+        "android.permission.health.READ_WEIGHT",
+        "android.permission.health.READ_HYDRATION"
+      ],
+      "blockedPermissions": [
+        "android.permission.WRITE_CALENDAR",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "output": "single",
+      "favicon": "./assets/images/favicon.png",
+      "name": "VitaSense",
+      "shortName": "VitaSense",
+      "themeColor": "#F2F2EF",
+      "backgroundColor": "#F2F2EF",
+      "description": "VitaSense knows how you live, explains why you feel unwell and tells you which doctor to see. It never prescribes."
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F2F2EF",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 110
+        }
+      ],
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "VitaSense uses the camera to scan lab reports and prescriptions you choose to add.",
+          "photosPermission": "VitaSense opens the photos you choose to add as health records.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "VitaSense uses your location to find doctors near you and to check air quality and outbreaks in your area."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#111111"
+        }
+      ],
+      "react-native-health-connect",
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "VitaSense looks at how busy your days are to understand stress and sleep. Event titles never leave your phone."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ],
+      "expo-secure-store",
+      "./plugins/with-short-native-build-paths"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "description": "VitaSense knows how you live, explains why you feel unwell and tells you which doctor to see. It never prescribes.",
+    "primaryColor": "#111111",
+    "backgroundColor": "#F2F2EF"
+  }
+}

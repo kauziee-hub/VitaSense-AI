@@ -6,7 +6,8 @@ from typing import Any
 
 from supabase import Client
 
-from db.demo_seed_data import DEMO_TODAY, DEMO_USER_IDS, demo_chat_history, demo_daily_history, merge_demo_context, merge_demo_row
+from db.supabase_client import database_marked_unreachable, is_connection_error, mark_unreachable
+from db.demo_seed_data import DEMO_USER_IDS, demo_chat_history, demo_daily_history, merge_demo_context, merge_demo_row
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ def _normalize_rows(rows: Any) -> list[dict[str, Any]]:
 
 
 async def _execute_with_timeout(query_factory, *, user_id: int, table_name: str):
+    if database_marked_unreachable():
+        return None  # known to be down: fall back now instead of waiting for the same failure
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(lambda: query_factory().execute()),
@@ -67,10 +70,13 @@ async def _execute_with_timeout(query_factory, *, user_id: int, table_name: str)
         )
     except asyncio.TimeoutError:
         logger.error("Supabase query timed out", extra={"user_id": user_id, "table": table_name})
+        mark_unreachable()
         return None
     except Exception as exc:
         if _is_missing_single_row(exc):
             return None
+        if is_connection_error(exc):
+            mark_unreachable()
         logger.error("Supabase query failed", extra={"user_id": user_id, "table": table_name})
         return None
 
@@ -170,7 +176,7 @@ async def load_recent_daily_data(
     if days <= 0:
         raise ValueError("days must be a positive integer")
 
-    today = DEMO_TODAY if user_id in DEMO_USER_IDS else date.today()
+    today = date.today()
     cutoff = (today - timedelta(days=days)).isoformat()
     bounded_limit = min(days, 30)
 
@@ -192,7 +198,21 @@ async def load_recent_daily_data(
                 for demo_row in demo_rows
             ]
         data[query.table_name] = rows
-    return data
+    return _with_collected(data, user_id=user_id, cutoff=cutoff)
+
+
+def _with_collected(data: dict[str, list[dict[str, Any]]], *, user_id: int, cutoff: str) -> dict[str, list[dict[str, Any]]]:
+    """Automatically collected values (phone, location, email, check-ins) win over stored or demo values."""
+    try:
+        from collect.store import get_collected_store, overlay_daily_rows
+
+        collected = get_collected_store().read_days(user_id, cutoff)
+    except Exception:
+        logger.error("Collected data could not be read", extra={"user_id": user_id})
+        return data
+    if not collected:
+        return data
+    return overlay_daily_rows(data, collected, user_id=user_id)
 
 
 async def load_recent_chatbot_history(

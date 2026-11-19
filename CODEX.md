@@ -102,9 +102,12 @@ npm run dev
 
 | Variable | Required for | Notes |
 |----------|----------------|-------|
-| `GROK_API_KEY` | Grok chat, `grok: true` on `/health` | If unset, app **still starts**; chat returns **503**; lifespan logs a warning |
+| `GEMINI_API_KEY` | Chat, record reading, doctor-report narrative (preferred provider) | `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` override the model chain |
+| `GROK_API_KEY` | Fallback chat provider | Used only when no Gemini key; cannot read documents. If neither is set the app **still starts**; chat returns **503** |
 | `SUPABASE_URL` | All Supabase-backed routes | |
 | `SUPABASE_SERVICE_ROLE_KEY` | Same | **Never** expose to frontend or commit |
+| `GOOGLE_MAPS_API_KEY` | Optional | Google Places for nearby doctors; otherwise OpenStreetMap |
+| `VITASENSE_DATA_DIR` | Optional | Folder for the local records database and uploads (default `./data`) |
 | `CORS_ORIGINS` | Optional | Extra allowed browser origins |
 
 ### Frontend (`vitasense-ai-2/.env` or `.env.development`)
@@ -132,8 +135,31 @@ All under the running host (e.g. `http://127.0.0.1:8888`).
 | PUT | `/api/v1/user/{user_id}/setup-context` | Onboarding / profile upserts |
 | GET | `/api/v1/user/{user_id}/wellness-forecast` | Deterministic JSON forecast |
 | GET | `/api/v1/user/{user_id}/locality-health-intelligence?city=...&locality=...&radius_km=3` | Hyperlocal disease, symptom, hazard, food-safety, and predictive risk intelligence |
+| POST | `/api/v1/user/{user_id}/records` | Multipart `file` (PDF/JPG/PNG/WEBP/HEIC, ≤15 MB). Gemini reads it into lab results, conditions, allergies, medicines, doctor advice. Same file twice returns the existing record with `duplicate: true` |
+| GET | `/api/v1/user/{user_id}/records` | `{ records, summary }`; summary = latest value per lab, flagged labs, conditions, allergies, medicines |
+| DELETE | `/api/v1/user/{user_id}/records/{record_id}` | Deletes the record, its file and medicines created from it |
+| POST | `/api/v1/user/{user_id}/records/{record_id}/medications` | Body `{ indices? }`: turn a prescription's medicines into reminders |
+| GET | `/api/v1/user/{user_id}/medications/today` | Today's doses with status (taken/skipped/missed/due/upcoming/unlogged), as-needed list, 7-day adherence |
+| PUT | `/api/v1/user/{user_id}/medications/{med_id}/doses` | Body `{ date, time, status: taken\|skipped\|pending }` |
+| PATCH | `/api/v1/user/{user_id}/medications/{med_id}` | Body `{ active?, times? }` |
+| POST | `/api/v1/user/{user_id}/doctor-report` | Body `{ user_name, specialty, concern, conversation? }` → one-page visit report (facts from data + AI-written reason, timeline, questions; facts-only if AI is down) |
+| GET | `/api/v1/doctors/nearby?lat&lng&specialty&radius_km=5` | Google Places if `GOOGLE_MAPS_API_KEY`, else OpenStreetMap Nominatim; ranked specialist → hospital → clinic, plus a Google Maps search link |
+| POST | `/api/v1/user/{user_id}/collect/environment` | Body `{ lat, lng }`: Open-Meteo weather + US AQI for today and the past 14 days, heat and mosquito-breeding levels; stores the area name only |
+| POST | `/api/v1/user/{user_id}/collect/device` | Body `{ source: health_connect\|apple_health\|calendar\|screen_time, health?, calendar?, screen? }`: daily aggregates from the phone, mapped onto the daily tables |
+| POST | `/api/v1/user/{user_id}/collect/gmail` | Body `{ access_token, days?, utc_offset_minutes? }`: searches mail from known food/grocery/pharmacy/lab/travel senders only, classifies orders with Gemini, adds lab-report PDFs to records. Token never stored |
+| POST | `/api/v1/user/{user_id}/collect/emails` | Same classification for emails read elsewhere; mail from other senders is dropped unread |
+| GET | `/api/v1/user/{user_id}/collect/status` | Connections, last syncs, recent orders/purchases, latest environment and phone health day |
+| DELETE | `/api/v1/user/{user_id}/collect/{source}` | Disconnect a source and delete everything collected from it |
+
+**Collected data (`collect/`):** written field by field into the same daily tables the forecast reads (`collect/store.py`), with the source of each value, and laid over hosted/demo rows by `db/user_context_loader.load_recent_daily_data`. Chat adds a `# PICKED UP AUTOMATICALLY` block (timestamped orders, measured weather and sleep). Demo profiles now roll with today's date so collected data lands in their window. Check-ins for real users save only what was entered (no generated sensor values).
+
+**Database offline:** users and check-ins fall back to the local store (local user ids start at 100000). A connection failure marks the hosted database unreachable for 60 s (`db/supabase_client.mark_unreachable`), so later queries fall back immediately instead of each waiting for DNS.
 
 **Auth:** None. `user_id` is passed explicitly after selecting or creating a user in the SPA.
+
+**Local records store:** `records/store.py` keeps uploads, medicines and dose logs in SQLite at `VITASENSE_DATA_DIR/vitasense_local.db` (default `./data/`, gitignored) so they work while Supabase is offline. Chat (`chat/orchestrator.py`) adds a `# MEDICAL RECORDS` block from `records/summary.py` to the system prompt.
+
+**Gemini resilience (`gemini_client.py`):** each model must send its first words within 8 s (15 s for document reading) or the next model is tried; a model that hangs or returns 429/503 is tried last for 5 minutes. Chat streams the model's words live; the reply-side safety scan only appends notes, sent as a final chunk.
 
 ---
 

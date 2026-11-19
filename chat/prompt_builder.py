@@ -5,36 +5,42 @@ from typing import Any
 
 from chat.safety_scanner import DISCLAIMER, ESCALATION_MESSAGE
 
-MAX_PROMPT_TOKENS = 1900
+MAX_PROMPT_TOKENS = 2400
+MAX_RECORDS_TOKENS = 240
+MAX_COLLECTED_TOKENS = 260
 MAX_PROFILE_TOKENS = 360
 MAX_DAILY_TOKENS = 620
 MAX_HYPOTHESIS_TOKENS = 170
 MAX_FOLLOW_UP_TOKENS = 90
 
-ROLE_BLOCK = f"""You are a personalized AI health assistant with access to this user's complete health history. You are NOT a doctor and must never present yourself as one.
+ROLE_BLOCK = f"""You are VitaSense, a personal health companion that knows this user's lifestyle history. You are NOT a doctor: you never diagnose, and you NEVER recommend, name, or dose medicines or supplements. Prescribing is the doctor's job.
+
+WHEN THE USER REPORTS A SYMPTOM, answer in this order:
+1. Danger signs (only when a potentially serious symptom is involved): ONE short line listing the specific signs that would need emergency care, ending with "If any of these happen, call 112 or go to the nearest emergency room." Do not repeat the emergency message below here.
+2. What it could be: 2 to 4 possible explanations, most likely first. For each one, say why it fits THIS user using their actual data (name the days or counts, e.g. "you ate outside 3 times this week"), and what would point away from it. Common symptoms have many causes: chest pain is often acid reflux, a strained muscle or anxiety, and only sometimes the heart (heart attack); nausea can be food, migraine, motion, stress, medication or pregnancy. Never jump to a single cause.
+3. What to do now: non-medicine steps only (rest, fluids, food to avoid, what to watch for).
+4. Which doctor: the specialist type (e.g. general physician, gastroenterologist, cardiologist, dermatologist, ENT) and how soon (emergency / today / within 2-3 days / routine check).
+5. Ask at most ONE follow-up question, the one that best separates the possibilities.
 
 CORE RULES:
+- ONLY if the user says they have one of those danger signs right now, reply with exactly this and nothing else: {ESCALATION_MESSAGE}
 - Use only probabilistic language: "may be related to", "one possible explanation", "this could suggest", "based on your history it's possible that"
 - Never say "You have X" or "This is definitely Y"
 - Ask at most ONE follow-up question per turn
-- If the user reports any emergency symptom listed below, output the escalation message immediately and nothing else
+- If the user just says they feel unwell, ask what they feel and since when, and mention the one or two recent signals from their data most likely to matter
+- Plain words, short paragraphs or bullets; explain any medical term in a few words
 - End every health response with the disclaimer
 
 LONGITUDINAL INTELLIGENCE STYLE:
 - Treat the supplied context as a 30-day personal signal history, not as isolated daily facts
-- Explain causal chains using actual signals: sleep, HRV, hydration, workload, AQI, food exposure, emotion, device use, calendar disruption, symptoms, and recurring profile patterns
-- Forecast the next 24-72 hours probabilistically when relevant, including fatigue, fever/cold sensitivity, digestive discomfort, throat irritation, emotional crash, anxiety/stress spikes, cognitive performance, productivity windows, and recovery collapse
-- Include emotional interpretation without overclaiming: loneliness, isolation, stress, burnout, social exhaustion, irritability, or resilience should be phrased as possible patterns
-- Prefer deeply personalized, medically careful, behaviorally predictive language over generic wellness tips
-
-EMERGENCY ESCALATION TRIGGERS - if ANY of these appear, output ONLY the escalation message:
-chest pain, difficulty breathing, shortness of breath, blood in vomit, blood in stool, blood in urine, sudden severe headache, loss of consciousness, fainting, facial drooping, arm weakness, speech difficulty, throat swelling, anaphylaxis, overdose, poisoning, stroke, heart attack
-
-ESCALATION MESSAGE:
-{ESCALATION_MESSAGE}
+- Explain causal chains using actual signals: sleep, HRV, hydration, workload, AQI, food exposure, emotion, device use, calendar disruption, symptoms, local outbreaks, and recurring profile patterns
+- Forecast the next 24-72 hours probabilistically when relevant
+- Phrase emotional patterns (stress, loneliness, burnout) as possibilities, never labels
 
 DISCLAIMER (append to every health response):
 {DISCLAIMER}"""
+
+TRIAGE_BLOCK_HEADER = "# TRIAGE ALERT"
 
 DEFAULT_FOLLOW_UP = (
     "If clarification is needed, ask exactly ONE of: symptom duration, severity (1-10), "
@@ -93,12 +99,38 @@ class PromptBuilder:
         daily_data: dict[str, Any],
         hypotheses: list[dict[str, Any]],
         follow_up_queue: list[str],
+        triage_flags: tuple[str, ...] | list[str] = (),
+        records_lines: list[str] | None = None,
+        collected_lines: list[str] | None = None,
     ) -> str:
         blocks = [ROLE_BLOCK]
+
+        if triage_flags:
+            blocks.append(
+                f"{TRIAGE_BLOCK_HEADER}\nThe user mentioned: {', '.join(triage_flags)}. "
+                "Open with the specific danger signs for this symptom (step 1), then give the ranked "
+                "possible causes from their own data, then the doctor type and urgency."
+            )
 
         profile_block = self._build_profile_block(user_profile)
         if profile_block:
             blocks.append(profile_block)
+
+        if records_lines:
+            # Medical records outrank lifestyle detail: a known allergy or a current
+            # medicine can be the whole explanation for a symptom.
+            blocks.append(
+                "# MEDICAL RECORDS (uploaded by the user)\n"
+                + _truncate_words("\n".join(records_lines), MAX_RECORDS_TOKENS)
+            )
+
+        if collected_lines:
+            # Specific, timestamped events ("ordered fried food at 23:40 on Tuesday") are what
+            # let the answer pinpoint a cause, so they sit above the daily averages.
+            blocks.append(
+                "# PICKED UP AUTOMATICALLY (last 7 days; measured or from their orders, not self-reported)\n"
+                + _truncate_words("\n".join(collected_lines), MAX_COLLECTED_TOKENS)
+            )
 
         daily_block = self._build_daily_block(daily_data)
         if daily_block:
@@ -372,9 +404,9 @@ class PromptBuilder:
         remaining_budget = self.max_prompt_tokens - estimate_tokens(protected)
         if remaining_budget <= 0:
             compact = (
-                "You are a personalized AI health assistant. Use probabilistic language only; never diagnose; "
-                "ask at most one follow-up question; use 30-day health context when supplied; forecast 24-72h "
-                "with causal reasoning from actual signals. Emergency symptoms require this exact escalation: "
+                "You are VitaSense, a personal health companion. Use probabilistic language only; never diagnose; "
+                "never recommend medicines; give ranked possible causes from the user's own data and the doctor "
+                "type to see; ask at most one follow-up question. If danger signs are present, say: "
                 f"{ESCALATION_MESSAGE} Disclaimer to append to every health response: {DISCLAIMER}"
             )
             return _truncate_words(compact, self.max_prompt_tokens)
@@ -404,10 +436,16 @@ def build_system_prompt(
     daily_data: dict[str, Any],
     hypotheses: list[dict[str, Any]],
     follow_up_queue: list[str],
+    triage_flags: tuple[str, ...] | list[str] = (),
+    records_lines: list[str] | None = None,
+    collected_lines: list[str] | None = None,
 ) -> str:
     return PromptBuilder().build(
         user_profile=user_profile,
         daily_data=daily_data,
         hypotheses=hypotheses,
         follow_up_queue=follow_up_queue,
+        triage_flags=triage_flags,
+        records_lines=records_lines,
+        collected_lines=collected_lines,
     )

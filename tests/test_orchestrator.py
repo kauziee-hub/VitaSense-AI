@@ -112,14 +112,6 @@ async def _empty_daily(supabase, user_id, days):
     return {}
 
 
-def test_chunk_text_preserves_words():
-    assert orchestrator._chunk_text("alpha beta gamma", chunk_size=10) == [
-        "alpha beta ",
-        "gamma",
-    ]
-    assert "".join(orchestrator._chunk_text("alpha beta gamma", chunk_size=10)) == "alpha beta gamma"
-
-
 @pytest.mark.asyncio
 async def test_stream_chat_sse_always_emits_done(monkeypatch):
     monkeypatch.setattr(orchestrator, "load_user_health_context", _empty_profile)
@@ -146,7 +138,7 @@ async def test_emergency_precheck_blocks_before_grok(monkeypatch):
         orchestrator.stream_chat_sse(
             1,
             "session",
-            "I have chest pain",
+            "I have chest pain and my left arm is sweating",
             dependencies=_deps(grok, supabase, store),
         )
     )
@@ -210,16 +202,39 @@ async def test_postcheck_appends_disclaimer_before_streaming(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ai_emergency_output_is_replaced_before_streaming(monkeypatch):
+async def test_ai_can_discuss_serious_conditions_in_a_differential(monkeypatch):
+    """Explaining that chest pain is often reflux, sometimes the heart, must reach the user."""
     monkeypatch.setattr(orchestrator, "load_user_health_context", _empty_profile)
     monkeypatch.setattr(orchestrator, "load_recent_daily_data", _empty_daily)
-    deps = _deps(FakeGrokClient(chunks=["The user reports chest pain."]), FakeSupabase())
+    reply = "Chest pain after late spicy meals is often acid reflux; a heart attack is less likely here."
+    deps = _deps(FakeGrokClient(chunks=[reply]), FakeSupabase())
 
     chunks = await _collect_async(
         orchestrator.handle_chat_message(1, "session", "I feel odd", dependencies=deps)
     )
 
-    assert "".join(chunks) == ESCALATION_MESSAGE
+    response = "".join(chunks)
+    assert reply in response
+    assert ESCALATION_MESSAGE not in response
+    assert DISCLAIMER in response
+
+
+@pytest.mark.asyncio
+async def test_triage_symptom_reaches_model_with_triage_alert(monkeypatch):
+    monkeypatch.setattr(orchestrator, "load_user_health_context", _empty_profile)
+    monkeypatch.setattr(orchestrator, "load_recent_daily_data", _empty_daily)
+    grok = FakeGrokClient(chunks=["One possible explanation is acid reflux. " + DISCLAIMER])
+    supabase = FakeSupabase()
+
+    chunks = await _collect_async(
+        orchestrator.handle_chat_message(1, "session", "I have chest pain after dinner", dependencies=_deps(grok, supabase))
+    )
+
+    assert "acid reflux" in "".join(chunks)
+    system_prompt = grok.calls[0]["messages"][0]["content"]
+    assert "# TRIAGE ALERT" in system_prompt
+    assert "chest symptom" in system_prompt
+    assert supabase.inserts[-1][1]["ai_risk_level"] == "Medium"
 
 
 @pytest.mark.asyncio
@@ -234,7 +249,7 @@ async def test_grok_stream_failure_recovers_and_sse_completes(monkeypatch):
 
     joined = _join_sse_data(events)
     assert orchestrator.STREAM_ERROR_MESSAGE in joined
-    assert DISCLAIMER in joined
+    assert DISCLAIMER not in joined
     assert events[-1] == "data: [DONE]\n\n"
 
 
@@ -290,3 +305,47 @@ async def test_persistence_hooks_store_user_and_assistant_turns(monkeypatch):
     assert supabase.inserts[0][1]["user_id"] == 3
     assert supabase.inserts[0][1]["session_id"] == "abc"
     assert supabase.inserts[1][1]["message_role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_model_text_streams_live_before_safety_notes(monkeypatch):
+    monkeypatch.setattr(orchestrator, "load_user_health_context", _empty_profile)
+    monkeypatch.setattr(orchestrator, "load_recent_daily_data", _empty_daily)
+    deps = _deps(FakeGrokClient(chunks=["### What it could be\n", "* Dehydration\n", "* Short sleep"]), FakeSupabase())
+
+    chunks = await _collect_async(orchestrator.handle_chat_message(1, "s", "I feel tired", dependencies=deps))
+
+    # Each model delta is forwarded as its own chunk; the disclaimer arrives last.
+    assert chunks[:3] == ["### What it could be\n", "* Dehydration\n", "* Short sleep"]
+    assert chunks[3].strip() == DISCLAIMER
+
+
+def test_sse_event_keeps_trailing_newlines():
+    event = orchestrator.format_sse_event("### Heading\n")
+    data = "\n".join(line.removeprefix("data: ") for line in event.strip("\n").split("\n"))
+    assert data == "### Heading\n"
+
+
+class BreakingStream(FakeStream):
+    async def __anext__(self):
+        if self._index >= len(self.chunks):
+            raise RuntimeError("connection dropped")
+        return await super().__anext__()
+
+
+class BreakingGrokClient(FakeGrokClient):
+    async def chat(self, messages, **kwargs):
+        return BreakingStream(self.chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_cut_mid_answer_keeps_partial_text_and_says_so(monkeypatch):
+    monkeypatch.setattr(orchestrator, "load_user_health_context", _empty_profile)
+    monkeypatch.setattr(orchestrator, "load_recent_daily_data", _empty_daily)
+    deps = _deps(BreakingGrokClient(chunks=["Likely reflux because "]), FakeSupabase())
+
+    response = "".join(await _collect_async(orchestrator.handle_chat_message(1, "s", "burning chest", dependencies=deps)))
+
+    assert response.startswith("Likely reflux because")
+    assert "cut off" in response
+    assert orchestrator.STREAM_ERROR_MESSAGE not in response

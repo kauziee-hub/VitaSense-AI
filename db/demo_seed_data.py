@@ -4,7 +4,11 @@ from copy import deepcopy
 from datetime import date, timedelta
 from typing import Any
 
-DEMO_TODAY = date(2026, 5, 15)
+def demo_today() -> date:
+    """Demo history ends today, so real data collected on a demo profile shows up in the same window."""
+    return date.today()
+
+
 DEMO_USER_IDS = {1, 2, 3}
 
 
@@ -408,7 +412,8 @@ def demo_daily_payloads(user_id: int, log_date: date) -> dict[str, dict[str, Any
 
 
 def demo_daily_history(user_id: int, days: int = 30) -> dict[str, list[dict[str, Any]]]:
-    dates = [DEMO_TODAY - timedelta(days=offset) for offset in range(days)]
+    anchor = demo_today()
+    dates = [anchor - timedelta(days=offset) for offset in range(days)]
     history = {
         "daily_fitness_data": [],
         "daily_environment_data": [],

@@ -4,6 +4,17 @@ VitaSense AI is a local full-stack preventive health intelligence prototype. It 
 
 The current build is designed for local development and product validation. It does not require Docker.
 
+## Live
+
+| What | Where |
+|------|-------|
+| Website (product page + web app) | https://vitasense-ai-app.vercel.app |
+| Android app (APK) | https://vitasense-ai-app.vercel.app/downloads/VitaSense.apk |
+| API | https://vitasense-api.vercel.app (`/health` shows AI and database status) |
+
+The mobile app and website live in [`vitasense-app/`](vitasense-app/README.md) (Expo: Android, iPhone and web from one
+codebase). `vitasense-ai-2/` is the earlier Next.js dashboard, kept for reference.
+
 ## Feature Overview
 
 ### Predictive Wellness Forecast
@@ -282,7 +293,7 @@ The current local build has been validated against the upgraded schema.
 From the project root:
 
 ```powershell
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime + test tools; requirements.txt is runtime only
 ```
 
 Using a virtual environment is recommended:
@@ -290,7 +301,7 @@ Using a virtual environment is recommended:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 ### Frontend
@@ -437,6 +448,26 @@ PUT /api/v1/user/{user_id}/setup-context
 ```
 
 Stores permanent onboarding/profile data and generated profile summaries.
+
+## Deploy
+
+Both parts run on Vercel.
+
+**API** (this folder, project `vitasense-api`): `vercel.json` builds `main.py` with the Python runtime;
+`.vercelignore` keeps the app, old frontend, tests and local data out of the upload.
+
+1. In Supabase, run [`db/vitasense_hosted_storage.sql`](db/vitasense_hosted_storage.sql) once (SQL editor). It creates the
+   tables for records, medicines, dose logs and collected data, plus a private `health-records` storage bucket.
+2. Set these in the Vercel project (Production): `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+   `VITASENSE_STORAGE=supabase`, `VITASENSE_DATA_DIR=/tmp/vitasense`, and `CORS_ORIGINS` (the website's origin,
+   comma-separated if there are several). `GROK_API_KEY` is an optional fallback.
+3. `vercel deploy --prod` from this folder.
+
+With `VITASENSE_STORAGE=supabase` the records and collected-data stores use Supabase
+(`records/supabase_store.py`, `collect/supabase_store.py`); without it they use the local SQLite file in `data/`,
+which is what local runs and the tests use.
+
+**Website and Android app**: see "Build for release" in [`vitasense-app/README.md`](vitasense-app/README.md).
 
 ## Validation
 

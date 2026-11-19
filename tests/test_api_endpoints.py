@@ -291,7 +291,8 @@ def test_daily_log_endpoint_loads_each_daily_table_with_user_and_date_filters(mo
     assert eq_calls.count(("eq", "log_date", "2025-10-06")) == 5
 
 
-def test_daily_log_endpoint_upserts_all_daily_tables_by_user_and_log_date(monkeypatch):
+def test_daily_log_saves_only_what_a_real_user_entered(monkeypatch):
+    """Sleep, steps, air and screen time come from connected sources; a check-in must not invent them."""
     monkeypatch.setattr(main, "GrokClient", FakeGrokClient)
     supabase = EmptySupabase()
     monkeypatch.setattr(main, "get_supabase", lambda: supabase)
@@ -315,29 +316,29 @@ def test_daily_log_endpoint_upserts_all_daily_tables_by_user_and_log_date(monkey
         response = client.put("/api/v1/user/9/daily-log", json=payload)
 
     assert response.status_code == 200
-    body = response.json()
-    assert set(body["saved_tables"]) == {
-        "daily_fitness_data",
-        "daily_environment_data",
-        "daily_device_behavior_data",
-        "daily_calendar_data",
-        "daily_user_memory_logs",
-    }
+    assert response.json()["saved_tables"] == ["daily_user_memory_logs"]
 
     upsert_calls = [call for call in supabase.calls if call[0] == "upsert"]
-    assert len(upsert_calls) == 5
-    assert all(call[1]["user_id"] == 9 for call in upsert_calls)
-    assert all(call[1]["log_date"] == "2025-10-06" for call in upsert_calls)
-    assert all(call[2] == "user_id,log_date" for call in upsert_calls)
-
-    memory_payload = next(call[1] for call in upsert_calls if "breakfast_log" in call[1])
+    assert len(upsert_calls) == 1
+    memory_payload = upsert_calls[0][1]
+    assert memory_payload["user_id"] == 9 and memory_payload["log_date"] == "2025-10-06"
+    assert upsert_calls[0][2] == "user_id,log_date"
     assert memory_payload["chatbot_symptoms_reported"] == ["fatigue"]
     assert memory_payload["breakfast"] == "oats"
     assert memory_payload["chatbot_risk_level"] == "Low"
+    assert "steps" not in memory_payload and "sleep_hours" not in memory_payload
 
-    fitness_payload = next(call[1] for call in upsert_calls if "walking_distance_km" in call[1])
-    assert fitness_payload["steps"] > 0
-    assert fitness_payload["water_intake_liters"] > 0
+
+def test_demo_profiles_keep_their_generated_sensor_days(monkeypatch):
+    monkeypatch.setattr(main, "GrokClient", FakeGrokClient)
+    supabase = EmptySupabase()
+    monkeypatch.setattr(main, "get_supabase", lambda: supabase)
+
+    with TestClient(main.app) as client:
+        response = client.put("/api/v1/user/1/daily-log", json={"log_date": "2025-10-06", "manual": {"mood_today": "Happy"}})
+
+    assert response.status_code == 200
+    assert "daily_fitness_data" in response.json()["saved_tables"]
 
 
 def test_daily_log_endpoint_rejects_invalid_enum(monkeypatch):

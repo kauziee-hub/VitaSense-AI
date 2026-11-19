@@ -1,0 +1,14 @@
+# Deploy only the Python API from this folder (the app and website deploy from vitasense-app/).
+vitasense-app
+vitasense-ai-2
+VitalIQ_HealthChatBot
+.codex
+.claude
+data
+tests
+**/__pycache__
+*.pptx
+*.md
+New Text Document.txt
+.env
+.env.*

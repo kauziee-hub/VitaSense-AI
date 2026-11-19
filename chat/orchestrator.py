@@ -12,10 +12,14 @@ from chat.safety_scanner import (
     scan_ai_response,
     scan_user_message,
 )
-from db.supabase_client import get_supabase
+from db.supabase_client import database_marked_unreachable, get_supabase, is_connection_error, mark_unreachable
 from db.user_context_loader import load_recent_daily_data, load_user_health_context
-from grok_client import GrokClient
+from typing import Protocol
 from locality.intelligence import build_locality_health_intelligence
+from collect.store import get_collected_store
+from collect.summary import collected_prompt_lines
+from records.store import get_records_store
+from records.summary import build_records_summary, records_prompt_lines
 from state.conversation_store import ConversationStore, conversation_store
 
 logger = logging.getLogger(__name__)
@@ -23,21 +27,29 @@ logger = logging.getLogger(__name__)
 STREAM_ERROR_MESSAGE = (
     "I could not complete the response right now. Please try again in a moment."
 )
+CUT_OFF_NOTE = "\n\n_The answer was cut off. Please ask again._"
 PERSIST_TIMEOUT_SECONDS = 10.0
-STREAM_CHUNK_SIZE = 80
+MAX_RESPONSE_TOKENS = 1200
+
+
+class ChatModelClient(Protocol):
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
 class OrchestratorDependencies:
-    grok_client: GrokClient
+    # Named grok_client for backwards compatibility; holds any chat model client (Gemini, Grok).
+    grok_client: ChatModelClient
     supabase_factory: Callable[[], Any] = get_supabase
     store: ConversationStore = conversation_store
+    records_store_factory: Callable[[], Any] = get_records_store
+    collected_store_factory: Callable[[], Any] = get_collected_store
 
 
 def format_sse_event(data: str) -> str:
-    lines = data.splitlines()
-    if not lines:
-        lines = [""]
+    # split("\n"), not splitlines(): a chunk ending in a newline must keep it, or
+    # streamed markdown (headings, bullets) runs together on the client.
+    lines = data.replace("\r\n", "\n").split("\n")
     return "".join(f"data: {line}\n" for line in lines) + "\n"
 
 
@@ -60,6 +72,8 @@ async def persist_turn(
         "ai_risk_level": risk_level,
     }
 
+    if database_marked_unreachable():
+        return
     try:
         await asyncio.wait_for(
             asyncio.to_thread(
@@ -72,7 +86,9 @@ async def persist_turn(
             "Conversation persistence timed out",
             extra={"user_id": user_id, "session_id": session_id},
         )
-    except Exception:
+    except Exception as exc:
+        if is_connection_error(exc):
+            mark_unreachable()
         logger.error(
             "Conversation persistence failed",
             extra={"user_id": user_id, "session_id": session_id},
@@ -80,49 +96,12 @@ async def persist_turn(
 
 
 def _extract_delta(chunk: Any) -> str:
+    if isinstance(chunk, str):
+        return chunk
     try:
         return chunk.choices[0].delta.content or ""
     except (AttributeError, IndexError, KeyError, TypeError):
         return ""
-
-
-async def _collect_grok_response(
-    grok_client: GrokClient,
-    messages: list[dict[str, str]],
-) -> str:
-    stream = await grok_client.chat(
-        messages,
-        stream=True,
-        temperature=0.3,
-        max_tokens=600,
-    )
-
-    parts: list[str] = []
-    async for chunk in stream:
-        delta = _extract_delta(chunk)
-        if delta:
-            parts.append(delta)
-    return "".join(parts)
-
-
-def _chunk_text(text: str, chunk_size: int = STREAM_CHUNK_SIZE) -> list[str]:
-    if not text:
-        return []
-
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > chunk_size:
-        split_at = remaining.rfind(" ", 0, chunk_size + 1)
-        if split_at <= 0:
-            split_at = chunk_size
-        else:
-            split_at += 1
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:]
-
-    if remaining:
-        chunks.append(remaining)
-    return chunks
 
 
 async def handle_chat_message(
@@ -181,6 +160,19 @@ async def handle_chat_message(
                 extra={"user_id": user_id, "session_id": session_id},
             )
 
+    records_lines: list[str] = []
+    try:
+        records_summary = await asyncio.to_thread(build_records_summary, dependencies.records_store_factory(), user_id)
+        records_lines = records_prompt_lines(records_summary)
+    except Exception:
+        logger.error("Records context failed", extra={"user_id": user_id, "session_id": session_id})
+
+    collected_lines: list[str] = []
+    try:
+        collected_lines = await asyncio.to_thread(collected_prompt_lines, dependencies.collected_store_factory(), user_id)
+    except Exception:
+        logger.error("Collected context failed", extra={"user_id": user_id, "session_id": session_id})
+
     system_prompt = build_system_prompt(
         user_profile=user_profile,
         daily_data={
@@ -193,30 +185,58 @@ async def handle_chat_message(
         },
         hypotheses=state.hypotheses,
         follow_up_queue=state.follow_up_queue,
+        triage_flags=user_scan.triage_flags,
+        records_lines=records_lines,
+        collected_lines=collected_lines,
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(state.to_grok_messages(max_turns=10))
 
+    # Stream the model's words as they arrive. The reply-side safety scan only ever
+    # appends notes (disclaimer, "never prescribes"), so it runs at the end and its
+    # additions are sent as a final chunk.
+    parts: list[str] = []
+    failed = False
     try:
-        raw_response = await _collect_grok_response(dependencies.grok_client, messages)
+        stream = await dependencies.grok_client.chat(
+            messages,
+            stream=True,
+            temperature=0.3,
+            max_tokens=MAX_RESPONSE_TOKENS,
+        )
+        async for chunk in stream:
+            delta = _extract_delta(chunk)
+            if delta:
+                parts.append(delta)
+                yield delta
     except Exception:
         logger.error(
-            "Grok streaming failed",
-            extra={"user_id": user_id, "session_id": session_id},
+            "Chat model streaming failed",
+            extra={"user_id": user_id, "session_id": session_id, "partial": bool(parts)},
         )
-        raw_response = STREAM_ERROR_MESSAGE
+        failed = True
 
-    ai_scan = scan_ai_response(raw_response)
-    if ai_scan.verdict == SafetyResult.BLOCK:
-        response_text = ai_scan.modified_response or ESCALATION_MESSAGE
-        state.escalation_flag = True
-        risk_level = "Critical"
-    elif ai_scan.verdict == SafetyResult.FLAG and ai_scan.modified_response:
-        response_text = ai_scan.modified_response
-        risk_level = None
+    raw_response = "".join(parts)
+    risk_level: str | None = "Medium" if user_scan.triage_flags else None
+    if not raw_response.strip():
+        response_text = STREAM_ERROR_MESSAGE
+        yield STREAM_ERROR_MESSAGE
     else:
-        response_text = ai_scan.modified_response or raw_response
-        risk_level = None
+        if failed:
+            raw_response += CUT_OFF_NOTE
+            yield CUT_OFF_NOTE
+        ai_scan = scan_ai_response(raw_response)
+        if ai_scan.verdict == SafetyResult.BLOCK:
+            escalation = ai_scan.modified_response or ESCALATION_MESSAGE
+            response_text = f"{raw_response}\n\n{escalation}"
+            yield f"\n\n{escalation}"
+            state.escalation_flag = True
+            risk_level = "Critical"
+        else:
+            response_text = ai_scan.modified_response or raw_response
+            streamed = raw_response.rstrip()
+            if response_text.startswith(streamed) and len(response_text) > len(streamed):
+                yield response_text[len(streamed):]
 
     state.add_turn("assistant", response_text)
 
@@ -230,9 +250,6 @@ async def handle_chat_message(
             content=response_text,
             risk_level=risk_level,
         )
-
-    for chunk in _chunk_text(response_text):
-        yield chunk
 
 
 async def stream_chat_sse(

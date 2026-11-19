@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
@@ -131,7 +132,25 @@ def _bounded_score(score: float) -> int:
 
 
 def _bounded_probability(score: float) -> int:
-    return _bounded_score(score)
+    """Map an additive risk weight to a probability with diminishing returns.
+
+    Risk weights are sums of signal penalties; summed linearly they hit 100% after a single
+    bad week, which is neither believable nor useful. Saturate smoothly and never claim
+    more than 95% certainty from lifestyle signals alone.
+    """
+    if score <= 0:
+        return 0
+    return _bounded_score(95 * (1 - math.exp(-score / 70)))
+
+
+def _soft_score(start: float, value: float, *, floor: float = 12.0, scale: float = 45.0) -> int:
+    """Turn a linearly penalised score into one with diminishing penalties.
+
+    `start - value` is the accumulated penalty. Each extra bad signal still lowers the score,
+    but it tapers toward `floor` instead of crashing to 0.
+    """
+    penalty = max(0.0, start - value)
+    return _bounded_score(floor + (start - floor) * math.exp(-penalty / scale))
 
 
 def _text_blob(*values: Any) -> str:
@@ -359,12 +378,12 @@ def _engine_scores(context: SignalContext) -> dict[str, int]:
     environment -= _count_rows(context.environment_rows[:7], lambda row: str(row.get("pollen_level", "")).lower() in {"high", "very high"}) * 3
 
     return {
-        "recovery": _bounded_score(recovery),
-        "immunity": _bounded_score(immunity),
-        "emotional": _bounded_score(emotional),
-        "cognitive": _bounded_score(cognitive),
-        "lifestyle": _bounded_score(lifestyle),
-        "environment": _bounded_score(environment),
+        "recovery": _soft_score(84.0, recovery),
+        "immunity": _soft_score(82.0, immunity),
+        "emotional": _soft_score(80.0, emotional),
+        "cognitive": _soft_score(82.0, cognitive),
+        "lifestyle": _soft_score(80.0, lifestyle),
+        "environment": _soft_score(84.0, environment),
     }
 
 
@@ -408,7 +427,7 @@ def _energy_score(
     if calendar.get("sleep_schedule_disruption") is True:
         score -= 7
 
-    return _bounded_score(score)
+    return _soft_score(76.0, score)
 
 
 def _energy_trend(metrics: dict[str, MetricSignal]) -> Trend:
@@ -623,11 +642,11 @@ def _body_systems(context: SignalContext, engine_scores: dict[str, int]) -> list
     systems = [
         ("nervous_system", "Nervous system", engine_scores["recovery"], context.metrics["hrv"].trend, "HRV, sleep pressure, workload, and screen load are combined to estimate autonomic strain."),
         ("recovery", "Recovery", engine_scores["recovery"], context.metrics["sleep"].trend, "Sleep debt, HRV direction, hydration, and travel disruptions are shaping recovery reserve."),
-        ("hydration", "Hydration", _bounded_score(100 - _count_rows(context.fitness_rows[:7], lambda row: (_hydration_ml(row) or 2500) < 1700) * 12), context.metrics["hydration"].trend, "Hydration consistency is compared with your 30-day pattern and fatigue symptoms."),
+        ("hydration", "Hydration", _soft_score(96.0, 96 - _count_rows(context.fitness_rows[:7], lambda row: (_hydration_ml(row) or 2500) < 1700) * 12), context.metrics["hydration"].trend, "Hydration consistency is compared with your 30-day pattern and fatigue symptoms."),
         ("emotional_resilience", "Emotional resilience", engine_scores["emotional"], "below_baseline" if engine_scores["emotional"] < 60 else "near_baseline", "Mood, loneliness language, workload pressure, and recovery preference are used to infer emotional reserve."),
         ("immune_stress", "Immune stress", engine_scores["immunity"], "below_baseline" if engine_scores["immunity"] < 65 else "near_baseline", "Sleep, food exposure, AQI, hydration, and symptom text are combined for immune stress."),
         ("cognitive_clarity", "Cognitive clarity", engine_scores["cognitive"], "below_baseline" if engine_scores["cognitive"] < 65 else "near_baseline", "Focus quality is inferred from sleep, workload, screen timing, exams, and travel."),
-        ("sleep_pressure", "Sleep pressure", _bounded_score(100 - _sleep_debt(context.fitness_rows[:7]) * 9), context.metrics["sleep"].trend, "Recent sleep quantity is compared with the personal monthly baseline."),
+        ("sleep_pressure", "Sleep pressure", _soft_score(96.0, 96 - _sleep_debt(context.fitness_rows[:7]) * 9), context.metrics["sleep"].trend, "Recent sleep quantity is compared with the personal monthly baseline."),
         ("environmental_stress", "Environmental stress", engine_scores["environment"], context.metrics["aqi"].trend, "AQI, pollen, heat, UV, and outdoor exposure are weighted against your medical profile."),
     ]
     return [
