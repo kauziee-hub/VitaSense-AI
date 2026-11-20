@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS local_users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     user_code TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    biological_sex TEXT
 );
 """
 
@@ -91,6 +92,10 @@ class CollectedStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # Databases created before biological_sex existed: add the column in place.
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(local_users)")}
+            if "biological_sex" not in columns:
+                self._conn.execute("ALTER TABLE local_users ADD COLUMN biological_sex TEXT")
             self._conn.commit()
 
     # ---------- daily fields ----------
@@ -247,20 +252,32 @@ class CollectedStore:
 
     # ---------- local users (hosted database offline) ----------
 
-    def create_user(self, name: str, user_code: str) -> dict[str, Any]:
+    def create_user(self, name: str, user_code: str, biological_sex: str | None = None) -> dict[str, Any]:
         with self._lock:
             row = self._conn.execute("SELECT MAX(id) AS max_id FROM local_users").fetchone()
             next_id = max(LOCAL_USER_ID_START, (row["max_id"] or 0) + 1)
             self._conn.execute(
-                "INSERT INTO local_users (id, name, user_code, created_at) VALUES (?, ?, ?, ?)", (next_id, name, user_code, _now())
+                "INSERT INTO local_users (id, name, user_code, created_at, biological_sex) VALUES (?, ?, ?, ?, ?)",
+                (next_id, name, user_code, _now(), biological_sex),
             )
             self._conn.commit()
-        return {"id": next_id, "name": name, "user_code": user_code}
+        return {"id": next_id, "name": name, "user_code": user_code, "biological_sex": biological_sex}
 
     def list_users(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute("SELECT id, name, user_code FROM local_users ORDER BY id").fetchall()
+            rows = self._conn.execute("SELECT id, name, user_code, biological_sex FROM local_users ORDER BY id").fetchall()
         return [dict(row) for row in rows]
+
+    def update_user(self, user_id: int, changes: dict[str, Any]) -> dict[str, Any] | None:
+        sex = changes.get("biological_sex")
+        with self._lock:
+            if "biological_sex" in changes:
+                self._conn.execute("UPDATE local_users SET biological_sex = ? WHERE id = ?", (sex, user_id))
+                self._conn.commit()
+            row = self._conn.execute(
+                "SELECT id, name, user_code, biological_sex FROM local_users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
 
 _store: Any = None

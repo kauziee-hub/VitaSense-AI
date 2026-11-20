@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { calendarPermission, calendarSupported, readCalendarDays } from './calendar';
 import { validGmailToken } from './gmail';
 import { healthConnected, healthSourceKey, healthSupported, readHealthDays } from './health';
+import { syncAlerts, syncBand, syncUsage } from './phone';
 
 /**
  * Background-ish collection: runs when the app opens or returns to the foreground, for each
@@ -13,7 +14,7 @@ import { healthConnected, healthSourceKey, healthSupported, readHealthDays } fro
  * permission: switching a source on (Connected data screen) is where permission is asked.
  */
 
-export type SourceId = 'location' | 'health' | 'calendar' | 'gmail';
+export type SourceId = 'location' | 'health' | 'calendar' | 'gmail' | 'usage' | 'alerts' | 'band';
 
 export interface SourcePrefs {
   enabled: boolean;
@@ -29,6 +30,9 @@ const INTERVAL_MS: Record<SourceId, number> = {
   health: 60 * 60 * 1000,
   calendar: 6 * 60 * 60 * 1000,
   gmail: 6 * 60 * 60 * 1000,
+  usage: 3 * 60 * 60 * 1000,
+  alerts: 30 * 60 * 1000,
+  band: 30 * 60 * 1000,
 };
 
 const DEFAULTS: AllPrefs = {
@@ -36,7 +40,26 @@ const DEFAULTS: AllPrefs = {
   health: { enabled: false },
   calendar: { enabled: false },
   gmail: { enabled: false },
+  usage: { enabled: false },
+  alerts: { enabled: false },
+  band: { enabled: false },
 };
+
+/** Sync source -> the factor catalogue's source id (collect/factors.py). */
+export const FACTOR_SOURCE: Record<SourceId, string> = {
+  location: 'location',
+  health: 'health_connect',
+  calendar: 'calendar',
+  gmail: 'gmail',
+  usage: 'phone_usage',
+  alerts: 'notifications',
+  band: 'band',
+};
+
+export async function enabledFactorSources(userId: number): Promise<string[]> {
+  const prefs = await loadPrefs(userId);
+  return (Object.keys(prefs) as SourceId[]).filter((id) => prefs[id]?.enabled).map((id) => FACTOR_SOURCE[id]);
+}
 
 const prefsKey = (userId: number) => `vitasense.sources.${userId}`;
 
@@ -102,6 +125,9 @@ const RUNNERS: Record<SourceId, (userId: number) => Promise<string>> = {
   health: syncHealth,
   calendar: syncCalendar,
   gmail: (userId) => syncGmail(userId),
+  usage: syncUsage,
+  alerts: syncAlerts,
+  band: syncBand,
 };
 
 let running: Promise<boolean> | null = null;

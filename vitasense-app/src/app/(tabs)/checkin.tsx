@@ -21,6 +21,9 @@ import {
   Watch,
   Wind,
   Wine,
+  Coffee,
+  CakeSlice,
+  MoonStar,
 } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
@@ -53,12 +56,15 @@ const FEELING_MAP: Record<Feeling, { energy: DailyLogPayload['manual']['energy_l
 
 const SYMPTOMS = ['Headache', 'Tiredness', 'Sore throat', 'Cough', 'Fever', 'Acidity', 'Stomach upset', 'Nausea', 'Body ache', 'Stress', 'Low mood', 'Allergy'];
 
-type DayTag = 'outside' | 'junk' | 'alcohol' | 'smoked' | 'workload' | 'travel' | 'crowd' | 'doctor';
+type DayTag = 'outside' | 'junk' | 'sweets' | 'late_meal' | 'caffeine' | 'alcohol' | 'smoked' | 'workload' | 'travel' | 'crowd' | 'doctor';
 const DAY_TAGS: { key: DayTag; label: string; icon: LucideIcon }[] = [
   { key: 'outside', label: 'Ate outside', icon: Utensils },
   { key: 'junk', label: 'Junk / processed', icon: Pizza },
   { key: 'alcohol', label: 'Alcohol', icon: Wine },
   { key: 'smoked', label: 'Smoked', icon: Cigarette },
+  { key: 'caffeine', label: 'Lots of tea / coffee', icon: Coffee },
+  { key: 'sweets', label: 'Sweets / sugary drinks', icon: CakeSlice },
+  { key: 'late_meal', label: 'Ate after 10 pm', icon: MoonStar },
   { key: 'workload', label: 'Heavy workload', icon: Briefcase },
   { key: 'travel', label: 'Travelled', icon: Plane },
   { key: 'crowd', label: 'Crowded places', icon: Users },
@@ -69,13 +75,22 @@ const AUTO_SOURCES: { icon: LucideIcon; label: string; source: string; key: Sour
   { icon: Moon, label: 'Sleep', source: 'Health Connect on your phone', key: 'health' },
   { icon: Footprints, label: 'Steps & workouts', source: 'Health Connect on your phone', key: 'health' },
   { icon: HeartPulse, label: 'Heart rate & HRV', source: 'Your watch or band, via Health Connect', key: 'health' },
-  { icon: Wind, label: 'Air, heat & mosquitoes', source: 'Your location', key: 'location' },
+  { icon: Wind, label: 'Air, water & infection risk', source: 'Your location', key: 'location' },
   { icon: CalendarDays, label: 'Workload & travel', source: 'Your calendar', key: 'calendar' },
   { icon: UtensilsCrossed, label: 'Food & medicine orders', source: 'Gmail order emails', key: 'gmail' },
-  { icon: Watch, label: 'Screen time', source: 'Android usage access', key: null },
+  { icon: UtensilsCrossed, label: 'Delivery orders', source: 'Food & pharmacy app alerts', key: 'alerts' },
+  { icon: Watch, label: 'Screen time & phone-off sleep', source: 'Android usage access', key: 'usage' },
 ];
 
-const SERVER_KEY: Record<SourceId, SourceKey> = { location: 'location', health: 'health_connect', calendar: 'calendar', gmail: 'gmail' };
+const SERVER_KEY: Record<SourceId, SourceKey> = {
+  location: 'location',
+  health: 'health_connect',
+  calendar: 'calendar',
+  gmail: 'gmail',
+  usage: 'screen_time',
+  alerts: 'notifications',
+  band: 'band',
+};
 
 function todayIso() {
   const d = new Date();
@@ -119,7 +134,7 @@ export default function CheckInScreen() {
         travel_today: has('travel'),
         crowded_place_exposure: has('crowd'),
         doctor_consulted_today: has('doctor'),
-        daily_events: [...(has('alcohol') ? ['alcohol'] : []), ...(has('smoked') ? ['smoked'] : [])],
+        daily_events: (['alcohol', 'smoked', 'caffeine', 'sweets', 'late_meal'] as const).filter((t) => has(t)),
         emotional_event_notes: note.trim() || null,
       },
     };

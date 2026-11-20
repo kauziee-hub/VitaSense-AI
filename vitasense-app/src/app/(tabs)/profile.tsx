@@ -1,5 +1,5 @@
 import * as Location from 'expo-location';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import type { LucideIcon } from 'lucide-react-native';
 import {
   Bug,
@@ -20,14 +20,19 @@ import {
   ThermometerSun,
   UtensilsCrossed,
   Wind,
+  BellRing,
+  Smartphone,
+  Watch,
 } from 'lucide-react-native';
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Linking, Platform, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Linking, Platform, ScrollView, StyleSheet, useWindowDimensions, View, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BodySexChooser } from '@/body/BodySexChooser';
 import { calendarPermission, calendarSupported } from '@/collect/calendar';
 import { forgetGmailToken, GmailSignInButton, gmailConfigured } from '@/collect/gmail';
 import { connectHealth, healthAvailable, healthSupported, openHealthSettings } from '@/collect/health';
+import { alertsGranted, openAlertSettings, openUsageSettings, phoneSupported, usageGranted } from '@/collect/phone';
 import { type AllPrefs, loadPrefs, setSourceEnabled, type SourceId, syncGmailNow, syncSources } from '@/collect/sync';
 import { api, type CollectedItem, type CollectStatus, type SourceKey } from '@/lib/api';
 import { useSession } from '@/lib/session';
@@ -51,6 +56,25 @@ const SERVER_SOURCE: Record<SourceId, SourceKey> = {
   health: 'health_connect',
   calendar: 'calendar',
   gmail: 'gmail',
+  usage: 'screen_time',
+  alerts: 'notifications',
+  band: 'band',
+};
+
+/** Sources switched on from an Android settings page: we wait for the user to come back. */
+const SETTINGS_GRANTS: Partial<Record<SourceId, { granted: () => boolean; open: () => void; title: string; how: string }>> = {
+  usage: {
+    granted: usageGranted,
+    open: openUsageSettings,
+    title: 'Allow usage access',
+    how: 'On the next screen, find VitaSense and turn on “Permit usage access”. Only daily totals are read: screen time, night use and pick-ups. App names never leave your phone.',
+  },
+  alerts: {
+    granted: alertsGranted,
+    open: openAlertSettings,
+    title: 'Allow notification access',
+    how: 'On the next screen, turn on VitaSense. Only alerts from food, grocery and pharmacy apps (Swiggy, Zomato, Blinkit, Zepto, BigBasket, 1mg, PharmEasy…) are read; everything else is ignored.',
+  },
 };
 
 export default function ProfileScreen() {
@@ -58,13 +82,15 @@ export default function ProfileScreen() {
   const wide = width >= breakpoint.wide;
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { user, signOut, health, forecast, refreshForecast } = useSession();
+  const { user, signOut, health, forecast, refreshForecast, setBodySex } = useSession();
   const { tables } = useProfile();
   const [prefs, setPrefs] = useState<AllPrefs | null>(null);
   const [status, setStatus] = useState<CollectStatus | null>(null);
+  const [statusFailed, setStatusFailed] = useState(false);
   const [busy, setBusy] = useState<SourceId | 'all' | null>(null);
   const [healthState, setHealthState] = useState<'available' | 'needs_install' | 'unsupported'>('unsupported');
   const [version, setVersion] = useState(0);
+  const [awaitingGrant, setAwaitingGrant] = useState<SourceId | null>(null);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -74,13 +100,18 @@ export default function ProfileScreen() {
     Promise.all([loadPrefs(user.id), api.collectStatus(user.id).catch(() => null), healthAvailable()]).then(([p, s, h]) => {
       if (!alive) return;
       setPrefs(p);
-      setStatus(s);
+      // Keep what was shown before if a refresh fails; only an empty card shows the error.
+      if (s) setStatus(s);
+      setStatusFailed(!s);
       setHealthState(h);
     });
     return () => {
       alive = false;
     };
   }, [user, version]);
+
+  // Tabs stay mounted, so refresh whenever the tab is opened again (background sync may have added data).
+  useFocusEffect(reload);
 
   // Coming back from the Play Store or system settings: permissions or Health Connect may have changed.
   useEffect(() => {
@@ -97,8 +128,52 @@ export default function ProfileScreen() {
     await refreshForecast();
   };
 
+  // Back from Usage access / Notification access settings: switch the source on if allowed.
+  useEffect(() => {
+    if (!awaitingGrant || !user) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      const grant = SETTINGS_GRANTS[awaitingGrant];
+      if (grant?.granted()) {
+        const source = awaitingGrant;
+        setAwaitingGrant(null);
+        void (async () => {
+          setBusy(source);
+          try {
+            await setSourceEnabled(user.id, source, true);
+            await syncSources(user.id, { force: true, only: source });
+          } finally {
+            setBusy(null);
+            await afterSync();
+          }
+        })();
+      }
+    });
+    return () => subscription.remove();
+    // afterSync is recreated each render; the subscription only needs the pending source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingGrant, user]);
+
   const turnOn = async (source: SourceId) => {
     if (!user) return;
+    if (source === 'band') {
+      router.navigate('/band');
+      return;
+    }
+    const grant = SETTINGS_GRANTS[source];
+    if (grant && !grant.granted()) {
+      Alert.alert(grant.title, grant.how, [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Open settings',
+          onPress: () => {
+            setAwaitingGrant(source);
+            grant.open();
+          },
+        },
+      ]);
+      return;
+    }
     setBusy(source);
     try {
       if (source === 'location') {
@@ -247,6 +322,30 @@ export default function ProfileScreen() {
       available: gmailConfigured,
       unavailableNote: 'Needs a Google sign-in client ID on this build (see README).',
     },
+    {
+      id: 'alerts',
+      icon: BellRing,
+      title: 'Delivery app alerts',
+      detail: 'What you order from Swiggy, Zomato, Blinkit, Zepto, BigBasket and pharmacy apps, from their notifications. No other app is read.',
+      available: phoneSupported,
+      unavailableNote: 'On the VitaSense Android app.',
+    },
+    {
+      id: 'usage',
+      icon: Smartphone,
+      title: 'Phone usage',
+      detail: 'Screen time, phone use after midnight, pick-ups, and a sleep estimate from when the screen goes dark.',
+      available: phoneSupported,
+      unavailableNote: 'On the VitaSense Android app.',
+    },
+    {
+      id: 'band',
+      icon: Watch,
+      title: 'Fitness band (Bluetooth)',
+      detail: 'Live heart rate straight from a band, watch or chest strap. Bands that sync to Health Connect are covered above too.',
+      available: phoneSupported,
+      unavailableNote: 'On the VitaSense Android app.',
+    },
   ];
 
   const sourcesCard = (
@@ -255,6 +354,11 @@ export default function ProfileScreen() {
         <View style={{ flex: 1, gap: 2 }}>
           <Text variant="heading">Connected data</Text>
           <Text variant="small">One tap each. After that VitaSense collects on its own, so you never type it.</Text>
+          <Pressable onPress={() => router.navigate('/factors')} accessibilityRole="link">
+            <Text variant="small" style={{ color: color.ink, fontFamily: font.semibold, textDecorationLine: 'underline' }}>
+              See everything that affects your health and how each is tracked
+            </Text>
+          </Pressable>
         </View>
         {prefs && (Object.keys(prefs) as SourceId[]).some((k) => prefs[k].enabled) && (
           <Button
@@ -307,7 +411,7 @@ export default function ProfileScreen() {
     </Card>
   );
 
-  const pickedUpCard = <PickedUpCard status={status} />;
+  const pickedUpCard = <PickedUpCard status={status} failed={statusFailed} onRetry={reload} />;
 
   const identity = (
     <Card style={styles.identity}>
@@ -324,6 +428,14 @@ export default function ProfileScreen() {
         </View>
       </View>
       <Button label="Switch profile" kind="secondary" compact icon={<LogOut size={14} color={color.ink} />} onPress={() => void leave()} />
+      <View style={{ flexBasis: '100%', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <Text variant="small" style={{ flex: 1, minWidth: 160 }}>
+          Body map and health context (cycle, pregnancy and prostate questions only come up when relevant)
+        </Text>
+        <View style={{ width: 220 }}>
+          <BodySexChooser value={user?.biological_sex} onChange={(next) => void setBodySex(next)} />
+        </View>
+      </View>
     </Card>
   );
 
@@ -521,7 +633,7 @@ const KIND_ICON: Record<CollectedItem['kind'], LucideIcon> = {
   travel: Plane,
 };
 
-function PickedUpCard({ status }: { status: CollectStatus | null }) {
+function PickedUpCard({ status, failed, onRetry }: { status: CollectStatus | null; failed: boolean; onRetry: () => void }) {
   const env = status?.environment;
   const items = status?.recent_items ?? [];
   const healthDay = status?.latest_health;
@@ -535,7 +647,14 @@ function PickedUpCard({ status }: { status: CollectStatus | null }) {
         <Text variant="heading">Picked up automatically</Text>
         <Text variant="small">What VitaSense knows without you typing it. Used in every answer and your doctor report.</Text>
       </View>
-      {status === null ? (
+      {status === null && failed ? (
+        <View style={[styles.emptyBox, { gap: 10, alignItems: 'center' }]}>
+          <Text variant="body" style={{ textAlign: 'center' }}>
+            Couldn&apos;t load this right now. Your data is safe.
+          </Text>
+          <Button label="Try again" kind="secondary" compact onPress={onRetry} />
+        </View>
+      ) : status === null ? (
         <ActivityIndicator color={color.navy} style={{ paddingVertical: 16 }} />
       ) : empty ? (
         <View style={styles.emptyBox}>

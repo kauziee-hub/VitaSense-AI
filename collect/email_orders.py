@@ -61,6 +61,7 @@ SENDERS: dict[str, str] = {
     "metropolisindia": "lab",
     "agilus": "lab",
     "orangehealth": "lab",
+    "practo": "lab",
     "cult.fit": "fitness",
     "curefit": "fitness",
     "irctc": "travel",

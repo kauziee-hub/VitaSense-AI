@@ -5,7 +5,7 @@ import asyncio
 
 import httpx
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -27,6 +27,9 @@ from collect.email_orders import (
     sender_category,
 )
 from collect.environment import fetch_environment
+from collect.factors import Ctx as FactorCtx, build_factors, connected_sources, days_by_date
+from collect.outbreaks import fetch_notices, notices_for
+from collect.risks import assess as assess_risks
 from collect.store import get_collected_store
 from collect.summary import collection_status
 from db.demo_seed_data import DEMO_USER_IDS, demo_chat_history
@@ -187,10 +190,19 @@ class HistoryResponse(BaseModel):
     history: list[dict[str, Any]]
 
 
+BiologicalSex = Literal["male", "female"]
+
+
 class UserSummary(BaseModel):
     id: int
     user_code: str | None = None
     name: str
+    # Chooses the male or female body render; also context for the AI (e.g. period, pregnancy causes).
+    biological_sex: BiologicalSex | None = None
+
+
+class UpdateUserRequest(BaseModel):
+    biological_sex: BiologicalSex | None = None
 
 
 class UsersResponse(BaseModel):
@@ -200,6 +212,7 @@ class UsersResponse(BaseModel):
 class CreateUserRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     user_code: str | None = Field(default=None, min_length=1, max_length=80)
+    biological_sex: BiologicalSex | None = None
 
     @field_validator("name", "user_code")
     @classmethod
@@ -439,17 +452,19 @@ def _core_users_missing(rows: Any) -> bool:
 
 
 async def _fetch_user_rows(supabase: Any) -> list[dict[str, Any]]:
-    response = await asyncio.wait_for(
-        asyncio.to_thread(
-            lambda: (
-                supabase.table("users")
-                .select("id,user_code,name")
-                .order("id", desc=False)
-                .execute()
-            )
-        ),
-        timeout=HISTORY_QUERY_TIMEOUT_SECONDS,
-    )
+    async def query(columns: str) -> Any:
+        return await asyncio.wait_for(
+            asyncio.to_thread(lambda: supabase.table("users").select(columns).order("id", desc=False).execute()),
+            timeout=HISTORY_QUERY_TIMEOUT_SECONDS,
+        )
+
+    try:
+        response = await query("id,user_code,name,biological_sex")
+    except asyncio.TimeoutError:
+        raise
+    except Exception:
+        # Database without the biological_sex column (db/users_biological_sex.sql not applied yet).
+        response = await query("id,user_code,name")
     rows = getattr(response, "data", None)
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
@@ -483,20 +498,51 @@ async def list_users() -> UsersResponse:
         rows = [*CORE_LOCAL_USERS, *get_collected_store().list_users()]
 
     users = [
-        UserSummary(id=int(row["id"]), user_code=row.get("user_code"), name=str(row.get("name") or f"User {row['id']}"))
+        UserSummary(
+            id=int(row["id"]),
+            user_code=row.get("user_code"),
+            name=str(row.get("name") or f"User {row['id']}"),
+            biological_sex=row.get("biological_sex") if row.get("biological_sex") in ("male", "female") else None,
+        )
         for row in rows
         if "id" in row
     ]
     return UsersResponse(users=users)
 
 
+@app.put("/api/v1/users/{user_id}", response_model=UserSummary)
+async def update_user(user_id: int, payload: UpdateUserRequest) -> UserSummary:
+    if user_id <= 0:
+        raise HTTPException(status_code=422, detail="user_id must be a positive integer")
+    changes = payload.model_dump(exclude_unset=True)
+    try:
+        if database_marked_unreachable():
+            raise RuntimeError("database unreachable")
+        supabase = get_supabase()
+        response = await asyncio.wait_for(
+            asyncio.to_thread(lambda: supabase.table("users").update(changes).eq("id", user_id).execute()),
+            timeout=HISTORY_QUERY_TIMEOUT_SECONDS,
+        )
+        rows = getattr(response, "data", None)
+        if isinstance(rows, list) and rows:
+            return UserSummary(**{k: rows[0].get(k) for k in ("id", "user_code", "name", "biological_sex")})
+    except Exception:
+        logger.warning("User update failed on the hosted database; trying local users")
+    local = await asyncio.to_thread(get_collected_store().update_user, user_id, changes)
+    if local is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return UserSummary(**local)
+
+
 @app.post("/api/v1/users", response_model=UserSummary)
 async def create_user(payload: CreateUserRequest) -> UserSummary:
     user_code = payload.user_code or _user_code_from_name(payload.name)
-    insert_payload = {
+    insert_payload: dict[str, Any] = {
         "name": payload.name,
         "user_code": user_code,
     }
+    if payload.biological_sex:
+        insert_payload["biological_sex"] = payload.biological_sex
 
     try:
         if database_marked_unreachable():
@@ -514,7 +560,7 @@ async def create_user(payload: CreateUserRequest) -> UserSummary:
         )
     except Exception:
         logger.warning("User create failed on the hosted database; creating a local user")
-        local = await asyncio.to_thread(get_collected_store().create_user, payload.name, user_code)
+        local = await asyncio.to_thread(get_collected_store().create_user, payload.name, user_code, payload.biological_sex)
         return UserSummary(**local)
 
     rows = getattr(response, "data", None)
@@ -1182,7 +1228,7 @@ async def doctors_nearby(
 # Automatic data collection: location, phone data, order emails
 # ---------------------------------------------------------------------------
 
-COLLECT_SOURCES = {"location", "health_connect", "apple_health", "calendar", "screen_time", "gmail", "check_in"}
+COLLECT_SOURCES = {"location", "health_connect", "apple_health", "calendar", "screen_time", "gmail", "check_in", "notifications", "band"}
 MAX_REPORTS_PER_SYNC = 3
 
 
@@ -1260,6 +1306,7 @@ async def _ingest_emails(
     *,
     utc_offset_minutes: int,
     gmail: tuple[httpx.AsyncClient, str] | None = None,
+    source: str = "gmail",
 ) -> dict[str, Any]:
     store = get_collected_store()
     try:
@@ -1269,10 +1316,10 @@ async def _ingest_emails(
         raise HTTPException(status_code=502, detail="Couldn't read those emails right now. Please try again.") from None
 
     rows, items = order_rows(parsed, utc_offset_minutes=utc_offset_minutes)
-    await asyncio.to_thread(store.write_fields, user_id=user_id, source="gmail", rows=rows)
+    await asyncio.to_thread(store.write_fields, user_id=user_id, source=source, rows=rows)
     added = 0
     for item in items:
-        if await asyncio.to_thread(store.add_item, user_id=user_id, source="gmail", **item):
+        if await asyncio.to_thread(store.add_item, user_id=user_id, source=source, **item):
             added += 1
     # Remember mail that turned out to be irrelevant so the next sync doesn't read it again.
     for entry in parsed:
@@ -1281,7 +1328,7 @@ async def _ingest_emails(
             await asyncio.to_thread(
                 store.add_item,
                 user_id=user_id,
-                source="gmail",
+                source=source,
                 item_id=message.id,
                 happened_at=message.sent_at.isoformat(timespec="minutes"),
                 kind="not_relevant",
@@ -1325,8 +1372,61 @@ async def _ingest_emails(
                     logger.warning("Lab report attachment could not be read", extra={"user_id": user_id})
 
     result = {"emails_read": len(messages), "orders_found": len(items), "new_items": added, "reports_added": reports_added}
-    await asyncio.to_thread(store.mark_sync, user_id, "gmail", result)
+    await asyncio.to_thread(store.mark_sync, user_id, source, result)
     return {**result, "items": [{k: item[k] for k in ("happened_at", "kind", "summary")} for item in items]}
+
+
+class AppAlertIn(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    package: str = Field(min_length=3, max_length=200)
+    title: str = Field(default="", max_length=300)
+    text: str = Field(default="", max_length=2000)
+    posted_at: datetime
+
+
+class AppAlertBatchRequest(BaseModel):
+    alerts: list[AppAlertIn] = Field(max_length=100)
+    utc_offset_minutes: int = Field(default=330, ge=-720, le=840)
+
+
+# Android package -> the merchant's mail domain, so app alerts go through the same allowlist and
+# order reader as receipts. Anything not listed here is dropped unread.
+APP_PACKAGE_SENDERS = {
+    "in.swiggy.android": "alerts@swiggy.in",
+    "com.application.zomato": "alerts@zomato.com",
+    "com.grofers.customerapp": "alerts@blinkit.com",
+    "com.zeptoconsumerapp": "alerts@zeptonow.com",
+    "com.bigbasket.mobileapp": "alerts@bigbasket.com",
+    "com.jpl.jiomart": "alerts@jiomart.com",
+    "com.done.faasos": "alerts@eatsure.com",
+    "com.dominos": "alerts@dominos.co.in",
+    "com.aranoah.healthkart.plus": "alerts@1mg.com",
+    "com.phonegap.rxpal": "alerts@pharmeasy.in",
+    "com.netmedsmarketplace.netmeds": "alerts@netmeds.com",
+    "com.apollo.patientapp": "alerts@apollo247.com",
+    "com.practo.fabric": "alerts@practo.com",
+}
+
+
+@app.post("/api/v1/user/{user_id}/collect/notifications")
+async def collect_app_alerts(request: Request, user_id: int, payload: AppAlertBatchRequest) -> dict[str, Any]:
+    """Order and delivery alerts captured on the phone (Android notification access, switched on by
+    the user). Only alerts from known food, grocery and pharmacy apps are read; the rest are dropped."""
+    _require_user_id(user_id)
+    ai_client = _ai_client_for_reading(request)
+    messages = [
+        EmailMessage(
+            id=f"app:{alert.id}",
+            sender=APP_PACKAGE_SENDERS[alert.package.lower()],
+            subject=alert.title,
+            sent_at=alert.posted_at,
+            text=f"{alert.title}\n{alert.text}"[:1500],
+        )
+        for alert in payload.alerts
+        if alert.package.lower() in APP_PACKAGE_SENDERS
+    ]
+    result = await _ingest_emails(ai_client, user_id, messages, utc_offset_minutes=payload.utc_offset_minutes, source="notifications")
+    return {**result, "alerts_read": result.pop("emails_read")}
 
 
 @app.post("/api/v1/user/{user_id}/collect/emails")
@@ -1366,6 +1466,67 @@ async def collect_gmail(request: Request, user_id: int, payload: GmailSyncReques
             utc_offset_minutes=payload.utc_offset_minutes,
             gmail=(client, payload.access_token),
         )
+
+
+@app.get("/api/v1/user/{user_id}/factors")
+async def get_health_factors(
+    user_id: int,
+    platform: Literal["android", "ios", "web"] | None = Query(default=None),
+    connected: str = Query(default="", max_length=400, description="Comma-separated source ids switched on in the app"),
+    sex: Literal["male", "female"] | None = Query(default=None),
+) -> dict[str, Any]:
+    """Everything that can affect this person's health, what we know about each and how we know it."""
+    _require_user_id(user_id)
+    today = date.today()
+    store = get_collected_store()
+    since = (today - timedelta(days=35)).isoformat()
+    field_sources, server_connections, items = await asyncio.gather(
+        asyncio.to_thread(store.field_sources, user_id, since),
+        asyncio.to_thread(store.connections, user_id),
+        asyncio.to_thread(store.recent_items, user_id, 150),
+    )
+
+    merged: dict[str, Any] = {}
+    profile: dict[str, Any] = {}
+    try:
+        if database_marked_unreachable():
+            raise RuntimeError("database unreachable")
+        supabase = get_supabase()
+        merged, profile = await asyncio.gather(load_recent_daily_data(supabase, user_id, 30), load_user_health_context(supabase, user_id))
+    except Exception:
+        logger.warning("Factor context partly unavailable", extra={"user_id": user_id})
+        collected = await asyncio.to_thread(store.read_days, user_id, since)
+        merged = {table: [{"log_date": d, **row} for d, row in sorted(by_date.items(), reverse=True)] for table, by_date in collected.items()}
+    days = days_by_date(merged)
+
+    env_rows = days.get("daily_environment_data", {})
+    assessment = assess_risks(env_rows, today=today) if env_rows else {"risks": []}
+    latest_env = env_rows[max(env_rows)] if env_rows else {}
+    notices = notices_for(await fetch_notices(), latest_env.get("country")) if latest_env.get("country") else []
+    try:
+        records = await asyncio.to_thread(build_records_summary, get_records_store(), user_id)
+    except Exception:
+        records = {}
+
+    ctx = FactorCtx(
+        today=today,
+        days=days,
+        field_sources=field_sources,
+        connected=connected_sources(server_connections, [c.strip() for c in connected.split(",") if c.strip()]),
+        risks={risk["id"]: risk for risk in assessment["risks"]},
+        outbreaks=notices,
+        records=records,
+        profile={k: v for k, v in profile.items() if isinstance(v, dict)},
+        memory=list(merged.get("daily_user_memory_logs") or []),
+        items=items,
+        sex=sex,
+        demo=user_id in DEMO_USER_IDS,
+    )
+    result = build_factors(ctx, platform=platform)
+    result["risks"] = assessment["risks"]
+    result["outbreaks"] = notices
+    result["place"] = latest_env.get("location")
+    return result
 
 
 @app.get("/api/v1/user/{user_id}/collect/status")

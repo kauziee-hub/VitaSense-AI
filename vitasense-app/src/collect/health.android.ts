@@ -12,9 +12,11 @@ import {
 import type { HealthDayPayload } from '@/lib/api';
 
 /**
- * Health Connect (Android): sleep, steps, distance, exercise, heart rate, resting heart rate,
- * HRV, SpO2, weight and hydration from any watch, ring or app the user already syncs there.
- * Needs a development build (not Expo Go) and Health Connect on the phone.
+ * Health Connect (Android): everything a watch, band, ring, smart scale, BP cuff, glucometer or
+ * health app already syncs there — sleep, steps, distance, floors, exercise, calories, heart rate,
+ * resting heart rate, HRV, SpO2, breathing rate, body temperature, blood pressure, blood sugar,
+ * weight, body fat, VO2 max, food energy, water and (for women) the menstrual cycle.
+ * Needs a development or release build (not Expo Go) and Health Connect on the phone.
  */
 
 export const healthSupported = true;
@@ -33,9 +35,20 @@ const RECORDS = [
   'RespiratoryRate',
   'Weight',
   'Hydration',
+  'BodyTemperature',
+  'BloodPressure',
+  'BloodGlucose',
+  'BodyFat',
+  'Vo2Max',
+  'Nutrition',
+  'FloorsClimbed',
+  'MenstruationFlow',
+  'MenstruationPeriod',
 ] as const;
 
 const PERMISSIONS: Permission[] = RECORDS.map((recordType) => ({ accessType: 'read', recordType }));
+// Lets the hourly background sync read without the app being open (Android 14+ where offered).
+const BACKGROUND: Permission = { accessType: 'read', recordType: 'BackgroundAccessPermission' } as unknown as Permission;
 
 let ready = false;
 async function ensureInit(): Promise<boolean> {
@@ -57,6 +70,11 @@ export async function healthAvailable(): Promise<'available' | 'needs_install' |
 export async function connectHealth(): Promise<boolean> {
   if (!(await ensureInit())) return false;
   const granted = await requestPermission(PERMISSIONS);
+  try {
+    await requestPermission([BACKGROUND]);
+  } catch {
+    // Not offered on this phone; foreground syncing still works.
+  }
   return granted.length > 0;
 }
 
@@ -107,15 +125,17 @@ export async function readHealthDays(days = 14): Promise<HealthDayPayload[]> {
   start.setDate(start.getDate() - days);
   start.setHours(0, 0, 0, 0);
 
-  const [sleep, steps, distance, exercise, calories, heart, resting, hrv, spo2, respiration, weight, hydration] = await Promise.all(
-    RECORDS.map((type) => read(type, start, end)),
-  );
+  const [
+    sleep, steps, distance, exercise, calories, heart, resting, hrv, spo2, respiration, weight, hydration,
+    temperature, pressure, glucose, bodyFat, vo2, nutrition, floors, flow, period,
+  ] = await Promise.all(RECORDS.map((type) => read(type, start, end)));
 
-  const daysOut = new Map<string, HealthDayPayload & { _hr: number[]; _rhr: number[]; _hrv: number[]; _spo2: number[]; _rr: number[] }>();
+  type Bucket = HealthDayPayload & { _hr: number[]; _rhr: number[]; _hrv: number[]; _spo2: number[]; _rr: number[]; _temp: number[]; _sys: number[]; _dia: number[]; _glu: number[] };
+  const daysOut = new Map<string, Bucket>();
   const bucket = (key: string) => {
     let b = daysOut.get(key);
     if (!b) {
-      b = { date: key, _hr: [], _rhr: [], _hrv: [], _spo2: [], _rr: [] };
+      b = { date: key, _hr: [], _rhr: [], _hrv: [], _spo2: [], _rr: [], _temp: [], _sys: [], _dia: [], _glu: [] };
       daysOut.set(key, b);
     }
     return b;
@@ -155,14 +175,37 @@ export async function readHealthDays(days = 14): Promise<HealthDayPayload[]> {
   for (const r of spo2) bucket(dayKey(r.time as string))._spo2.push(num(r.percentage) ?? NaN);
   for (const r of respiration) bucket(dayKey(r.time as string))._rr.push(num(r.rate) ?? NaN);
   for (const r of weight) bucket(dayKey(r.time as string)).weight_kg = num(r.weight, 'inKilograms');
+  for (const r of temperature) bucket(dayKey(r.time as string))._temp.push(num(r.temperature, 'inCelsius') ?? NaN);
+  for (const r of pressure) {
+    const b = bucket(dayKey(r.time as string));
+    b._sys.push(num(r.systolic, 'inMillimetersOfMercury') ?? NaN);
+    b._dia.push(num(r.diastolic, 'inMillimetersOfMercury') ?? NaN);
+  }
+  for (const r of glucose) bucket(dayKey(r.time as string))._glu.push(num(r.level, 'inMilligramsPerDeciliter') ?? NaN);
+  for (const r of bodyFat) bucket(dayKey(r.time as string)).body_fat_percent = num(r.percentage) ?? num(r.percentage, 'value');
+  for (const r of vo2) bucket(dayKey(r.time as string)).vo2_max = num(r.vo2MillilitersPerMinuteKilogram);
+  for (const r of nutrition) add(bucket(dayKey(r.startTime as string)), 'nutrition_kcal', num(r.energy, 'inKilocalories'));
+  for (const r of floors) add(bucket(dayKey(r.startTime as string)), 'floors_climbed', num(r.floors));
+  const FLOW = { 1: 'light', 2: 'medium', 3: 'heavy' } as const;
+  for (const r of flow) {
+    const b = bucket(dayKey(r.time as string));
+    b.period_day = true;
+    const level = FLOW[(num(r.flow) ?? 0) as keyof typeof FLOW];
+    if (level) b.menstrual_flow = level;
+  }
+  for (const r of period) bucket(dayKey((r.startTime ?? r.time) as string)).period_day = true;
 
   const mean = (values: number[]) => {
     const clean = values.filter((v) => Number.isFinite(v));
     return clean.length ? Math.round((clean.reduce((a, b) => a + b, 0) / clean.length) * 10) / 10 : undefined;
   };
   return [...daysOut.values()]
-    .map(({ _hr, _rhr, _hrv, _spo2, _rr, ...day }) => ({
+    .map(({ _hr, _rhr, _hrv, _spo2, _rr, _temp, _sys, _dia, _glu, ...day }) => ({
       ...day,
+      body_temperature_c: mean(_temp),
+      systolic_mmhg: mean(_sys),
+      diastolic_mmhg: mean(_dia),
+      blood_glucose_mg_dl: mean(_glu),
       steps: day.steps !== undefined ? Math.round(day.steps) : undefined,
       exercise_minutes: day.exercise_minutes !== undefined ? Math.round(day.exercise_minutes) : undefined,
       heart_rate_avg: mean(_hr),

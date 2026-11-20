@@ -7,6 +7,7 @@ import Animated, { FadeIn, FadeInDown } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { BodyMap } from '@/body/BodyMap';
+import { BodySexChooser } from '@/body/BodySexChooser';
 import { SYSTEM_LOOK } from '@/body/art';
 import {
   CarePlanCard,
@@ -18,6 +19,7 @@ import {
   useAskNavigator,
   ZoomControls,
 } from '@/dashboard/parts';
+import { AroundYouCard } from '@/dashboard/aroundYou';
 import { SystemCarousel, SystemHero, SystemList, systemScores } from '@/dashboard/organs';
 import { useSession } from '@/lib/session';
 import { buildSystemView, mostConcerning, type SystemKey } from '@/lib/systems';
@@ -41,7 +43,9 @@ function readinessWord(score: number | null | undefined) {
 export default function DashboardScreen() {
   const { width, height } = useWindowDimensions();
   const wide = width >= breakpoint.wide;
-  const { user, forecast, forecastError, refreshForecast } = useSession();
+  const { user, forecast, forecastError, refreshForecast, setBodySex } = useSession();
+  const sex = user?.biological_sex ?? 'female';
+  const askSex = !user?.biological_sex;
   const [selected, setSelected] = useState<SystemKey | null>(null);
   const [zoom, setZoom] = useState(1);
   const [stageHeight, setStageHeight] = useState(0);
@@ -55,6 +59,15 @@ export default function DashboardScreen() {
   const scores = useMemo(() => systemScores(forecast), [forecast]);
   const firstName = user?.name.split(' ')[0] ?? '';
   const today = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
+  // One-time question for profiles made before the body choice existed.
+  const sexPrompt = (
+    <Animated.View entering={FadeInDown.duration(400)} style={styles.sexPrompt}>
+      <Text variant="bodyStrong" style={{ fontSize: 13 }}>
+        Show your body as
+      </Text>
+      <BodySexChooser value={user?.biological_sex} onChange={(next) => void setBodySex(next)} />
+    </Animated.View>
+  );
   const select = (next: SystemKey) => {
     setSelected(next);
     setZoom(1);
@@ -97,9 +110,10 @@ export default function DashboardScreen() {
           </View>
           <View style={styles.bodyWrap} pointerEvents="box-none">
             {bodyHeight > 0 && (
-              <BodyMap height={bodyHeight} selected={key} onSelect={select} scores={scores} zoom={zoom} callout={zoom === 1} />
+              <BodyMap height={bodyHeight} selected={key} onSelect={select} scores={scores} zoom={zoom} callout={zoom === 1} sex={sex} />
             )}
           </View>
+          {askSex && <View style={styles.stageBottomLeft}>{sexPrompt}</View>}
           <View style={styles.stageBottomRight}>
             <ZoomControls zoom={zoom} setZoom={setZoom} />
           </View>
@@ -120,6 +134,7 @@ export default function DashboardScreen() {
     return (
       <>
         <SystemHero view={view} compact={!isWide} />
+        <AroundYouCard />
         <View style={styles.row}>
           <ComparisonCard forecast={forecast} view={view} />
           <NarrativeCard view={view} onAsk={ask} />
@@ -173,8 +188,9 @@ export default function DashboardScreen() {
         <View style={styles.mobileStage}>
           <StageBackdrop tint={SYSTEM_LOOK[key].fill} />
           <View style={{ alignItems: 'center', paddingVertical: 18 }}>
-            <BodyMap height={bodyHeight} selected={key} onSelect={select} scores={scores} zoom={zoom} callout={zoom === 1} />
+            <BodyMap height={bodyHeight} selected={key} onSelect={select} scores={scores} zoom={zoom} callout={zoom === 1} sex={sex} />
           </View>
+          {askSex && <View style={{ position: 'absolute', left: 12, bottom: 12, right: 70 }}>{sexPrompt}</View>}
           <View style={{ position: 'absolute', right: 12, bottom: 12 }}>
             <ZoomControls zoom={zoom} setZoom={setZoom} />
           </View>
@@ -221,6 +237,15 @@ function LoadingOrError({ error, onRetry }: { error: string | null; onRetry: () 
 }
 
 const styles = StyleSheet.create({
+  stageBottomLeft: { position: 'absolute', left: 18, bottom: 18, zIndex: 3 },
+  sexPrompt: {
+    gap: 8,
+    padding: 12,
+    borderRadius: radius.md,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    boxShadow: '0px 8px 24px rgba(17,17,17,0.10)',
+    maxWidth: 260,
+  },
   wideRoot: { flex: 1, flexDirection: 'row' },
   leftCol: { width: 290, flexGrow: 0 },
   stage: { flex: 1.15, marginVertical: 16, marginHorizontal: 8, borderRadius: radius.xl, overflow: 'hidden', minWidth: 380 },

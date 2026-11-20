@@ -6,6 +6,8 @@ import * as WebBrowser from 'expo-web-browser';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 
+// Defines the background sync task at startup, before the OS can call it.
+import '@/collect/background';
 import { SessionProvider } from '@/lib/session';
 import { color } from '@/theme/tokens';
 

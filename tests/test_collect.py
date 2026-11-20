@@ -240,7 +240,8 @@ async def test_environment_builds_daily_rows_with_worst_hour_aqi():
     assert today_row["aqi"] == 161 and today_row["pm2_5"] == 50
     assert today_row["location"] == "Koramangala, Bengaluru"
     assert today_row["rain_14d_mm"] == 65 and today_row["mosquito_breeding_conditions"] == "high"
-    assert {a["type"] for a in result["alerts"]} == {"air_quality", "heat", "mosquito"}
+    assert {"air_pollution", "heat", "aedes"} <= {a["type"] for a in result["alerts"]}
+    assert {r["id"] for r in result["risks"]} >= {"air_pollution", "heat", "water", "aedes", "anopheles", "respiratory"}
 
 
 # ---------- endpoints ----------
@@ -380,3 +381,79 @@ async def test_expired_gmail_token_is_reported():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(401))) as client:
         with pytest.raises(PermissionError):
             await fetch_gmail_messages(client, "expired-token", days=30, skip_ids=set())
+
+
+def test_app_alerts_are_read_only_from_known_delivery_apps(monkeypatch, tmp_path):
+    import collect.store as store_module
+
+    local = CollectedStore(tmp_path / "alerts.db")
+    monkeypatch.setattr(store_module, "_store", local)
+    monkeypatch.setattr(main, "_build_ai_client", lambda: (FakeAI(), "gemini"))
+    posted = f"{YESTERDAY.isoformat()}T17:40:00+00:00"
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/v1/user/100000/collect/notifications",
+            json={
+                "alerts": [
+                    {"id": "n1", "package": "in.swiggy.android", "title": "Order delivered", "text": "Your pizza is here", "posted_at": posted},
+                    {"id": "n2", "package": "com.whatsapp", "title": "Mum", "text": "call me", "posted_at": posted},
+                ]
+            },
+        )
+        status = client.get("/api/v1/user/100000/collect/status")
+
+    assert response.status_code == 200
+    assert response.json()["alerts_read"] == 1  # WhatsApp was dropped unread
+    assert response.json()["items"][0]["kind"] == "food_order"
+    assert "notifications" in status.json()["connections"]
+    assert local.recent_items(100000)[0]["source"] == "notifications"
+
+
+def test_device_payload_carries_new_health_connect_measurements():
+    from collect.device import DevicePayload, map_device_payload
+
+    rows = map_device_payload(
+        DevicePayload(
+            source="health_connect",
+            health=[{"date": YESTERDAY.isoformat(), "systolic_mmhg": 128.4, "diastolic_mmhg": 84, "blood_glucose_mg_dl": 104, "vo2_max": 41.26, "period_day": True}],
+        )
+    )
+    day = rows["daily_fitness_data"][YESTERDAY.isoformat()]
+    assert day["blood_pressure"] == "128/84 mmHg"
+    assert day["blood_glucose_mg_dl"] == 104 and day["vo2_max"] == 41.3 and day["period_day"] is True
+
+
+def test_status_scores_stored_environment_days_and_new_sources_can_be_removed(monkeypatch, tmp_path):
+    """Regression: /collect/status returned 500 once any environment row existed, and the
+    notifications and band sources could not be switched off server-side."""
+    import collect.store as store_module
+
+    local = CollectedStore(tmp_path / "status.db")
+    monkeypatch.setattr(store_module, "_store", local)
+    monkeypatch.setattr(main, "_build_ai_client", lambda: (FakeAI(), "gemini"))
+    today = date.today()
+    rows = {
+        (today - timedelta(days=i)).isoformat(): {"aqi": 160, "pm2_5": 70, "temperature_mean_c": 24, "rain_mm": 0, "country_code": "in"}
+        for i in range(5)
+    }
+    local.write_fields(user_id=100000, source="location", rows={"daily_environment_data": rows})
+    local.write_fields(user_id=100000, source="band", rows={"daily_fitness_data": {today.isoformat(): {"avg_heart_rate": 72}}})
+
+    with TestClient(main.app) as client:
+        status = client.get("/api/v1/user/100000/collect/status")
+        band_off = client.delete("/api/v1/user/100000/collect/band")
+        alerts_off = client.delete("/api/v1/user/100000/collect/notifications")
+
+    assert status.status_code == 200
+    assert [a["type"] for a in status.json()["environment"]["alerts"]][:1] == ["air_pollution"]
+    assert band_off.status_code == 200 and alerts_off.status_code == 200
+    assert "avg_heart_rate" not in str(local.read_days(100000, (today - timedelta(days=1)).isoformat()))
+    assert "band" not in local.connections(100000)
+
+
+def test_environment_alerts_accepts_a_single_stored_row():
+    from collect.environment import environment_alerts
+
+    assert environment_alerts({"aqi": 170, "pm2_5": 80})[0]["type"] == "air_pollution"
+    assert environment_alerts({}) == []

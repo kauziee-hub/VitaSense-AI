@@ -3,10 +3,14 @@ import { forgetServer, serverUrl } from './server';
 export type Trend = 'below_baseline' | 'near_baseline' | 'above_baseline' | 'unknown';
 export type Severity = 'low' | 'medium' | 'high';
 
+export type BiologicalSex = 'male' | 'female';
+
 export interface AppUser {
   id: number;
   name: string;
   user_code?: string | null;
+  /** Picks the male or female body render. */
+  biological_sex?: BiologicalSex | null;
 }
 
 export interface Metric {
@@ -116,7 +120,10 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
 export const api = {
   health: () => request<Health>('/health', { timeoutMs: 8000 }),
   users: () => request<{ users: AppUser[] }>('/api/v1/users').then((r) => r.users),
-  createUser: (name: string) => request<AppUser>('/api/v1/users', { method: 'POST', body: JSON.stringify({ name }) }),
+  createUser: (name: string, biologicalSex?: BiologicalSex | null) =>
+    request<AppUser>('/api/v1/users', { method: 'POST', body: JSON.stringify({ name, biological_sex: biologicalSex ?? null }) }),
+  updateUser: (id: number, changes: { biological_sex: BiologicalSex | null }) =>
+    request<AppUser>(`/api/v1/users/${id}`, { method: 'PUT', body: JSON.stringify(changes) }),
   forecast: (userId: number) => request<Forecast>(`/api/v1/user/${userId}/wellness-forecast`),
   locality: (userId: number) => request<LocalityIntel>(`/api/v1/user/${userId}/locality-health-intelligence`),
   setupContext: (userId: number) =>
@@ -149,6 +156,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ lat, lng }),
       timeoutMs: 30000,
+    }),
+  factors: (userId: number, opts: { platform: 'android' | 'ios' | 'web'; connected: string[]; sex?: BiologicalSex | null }) => {
+    const query = new URLSearchParams({ platform: opts.platform, connected: opts.connected.join(',') });
+    if (opts.sex) query.set('sex', opts.sex);
+    return request<HealthFactors>(`/api/v1/user/${userId}/factors?${query.toString()}`, { timeoutMs: 30000 });
+  },
+  collectAppAlerts: (userId: number, alerts: AppAlertPayload[]) =>
+    request<{ alerts_read: number; orders_found: number; new_items: number }>(`/api/v1/user/${userId}/collect/notifications`, {
+      method: 'POST',
+      body: JSON.stringify({ alerts, utc_offset_minutes: -new Date().getTimezoneOffset() }),
+      timeoutMs: 60000,
     }),
   collectDevice: (userId: number, payload: DevicePayload) =>
     request<{ days: number; fields: number }>(`/api/v1/user/${userId}/collect/device`, {
@@ -362,7 +380,16 @@ export const DEMO_USERS: AppUser[] = [
 
 /* ---------- Automatic collection ---------- */
 
-export type SourceKey = 'location' | 'health_connect' | 'apple_health' | 'calendar' | 'screen_time' | 'gmail' | 'check_in';
+export type SourceKey =
+  | 'location'
+  | 'health_connect'
+  | 'apple_health'
+  | 'calendar'
+  | 'screen_time'
+  | 'gmail'
+  | 'check_in'
+  | 'notifications'
+  | 'band';
 
 export interface EnvironmentAlert {
   type: 'air_quality' | 'heat' | 'mosquito';
@@ -410,6 +437,86 @@ export interface HealthDayPayload {
   respiratory_rate?: number;
   weight_kg?: number;
   hydration_ml?: number;
+  body_temperature_c?: number;
+  systolic_mmhg?: number;
+  diastolic_mmhg?: number;
+  blood_glucose_mg_dl?: number;
+  body_fat_percent?: number;
+  vo2_max?: number;
+  nutrition_kcal?: number;
+  floors_climbed?: number;
+  period_day?: boolean;
+  menstrual_flow?: 'light' | 'medium' | 'heavy';
+}
+
+export interface ScreenDayPayload {
+  date: string;
+  screen_minutes: number;
+  late_night_minutes: number;
+  longest_session_minutes?: number | null;
+  unlocks?: number | null;
+  quiet_start?: string | null;
+  quiet_end?: string | null;
+  quiet_minutes?: number | null;
+}
+
+export interface AppAlertPayload {
+  id: string;
+  package: string;
+  title: string;
+  text: string;
+  posted_at: string;
+}
+
+export type FactorStatus = 'live' | 'recorded' | 'waiting' | 'connect' | 'on_phone' | 'manual' | 'not_tracked';
+export type FactorSourceId =
+  | 'health_connect'
+  | 'band'
+  | 'phone_usage'
+  | 'notifications'
+  | 'location'
+  | 'gmail'
+  | 'calendar'
+  | 'records'
+  | 'check_in'
+  | 'profile'
+  | 'chat';
+
+export interface HealthFactor {
+  id: string;
+  label: string;
+  affects: string;
+  status: FactorStatus;
+  value: string | null;
+  updated: string | null;
+  source: FactorSourceId | 'demo' | null;
+  sources: { id: FactorSourceId; label: string; connected: boolean; automatic: boolean }[];
+  connect_with: FactorSourceId | null;
+  note: string | null;
+}
+
+export interface EnvironmentRisk {
+  id: string;
+  category: string;
+  title: string;
+  level: 'low' | 'moderate' | 'high';
+  score: number;
+  why: string[];
+  causes: string[];
+  watch_for: string[];
+  protect: string[];
+  see_doctor: string;
+  kind: 'measured' | 'estimate';
+  source: string;
+}
+
+export interface HealthFactors {
+  categories: { id: string; label: string; factors: HealthFactor[] }[];
+  counts: Record<FactorStatus | 'total' | 'automatic_capable', number>;
+  sources: { id: FactorSourceId; label: string; detail: string; platforms: string[]; connected: boolean; automatic: boolean }[];
+  risks: EnvironmentRisk[];
+  outbreaks: { title: string; date: string; url: string; source: string }[];
+  place: string | null;
 }
 
 export interface CalendarDayPayload {
@@ -423,9 +530,10 @@ export interface CalendarDayPayload {
 }
 
 export interface DevicePayload {
-  source: 'health_connect' | 'apple_health' | 'calendar' | 'screen_time';
+  source: 'health_connect' | 'apple_health' | 'calendar' | 'screen_time' | 'band';
   health?: HealthDayPayload[];
   calendar?: CalendarDayPayload[];
+  screen?: ScreenDayPayload[];
 }
 
 export interface CollectedItem {

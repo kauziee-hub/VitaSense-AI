@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from collect.environment import aqi_band, environment_alerts
+from collect.environment import aqi_band
+from collect.outbreaks import cached_notices, notices_for
+from collect.risks import assess as assess_risks, top_alerts
 from collect.store import CollectedStore
 
 SOURCE_LABELS = {
@@ -15,6 +17,8 @@ SOURCE_LABELS = {
     "screen_time": "screen time",
     "location": "location (weather and air)",
     "gmail": "food, grocery and pharmacy orders (Gmail)",
+    "notifications": "food, grocery and pharmacy order alerts (phone notifications)",
+    "band": "fitness band heart rate (Bluetooth)",
     "check_in": "daily check-in",
 }
 
@@ -52,7 +56,8 @@ def collected_prompt_lines(store: CollectedStore, user_id: int, *, today: date |
         lines.append(f"{_when(item.get('happened_at'))}: {item['summary']}{tag}")
 
     days = store.read_days(user_id, since)
-    env = _latest(days.get("daily_environment_data", {}))
+    env_days = days.get("daily_environment_data", {})
+    env = _latest(env_days)
     if env:
         day, row = env
         parts = []
@@ -64,10 +69,21 @@ def collected_prompt_lines(store: CollectedStore, user_id: int, *, today: date |
             parts.append(f"humidity {row['humidity_percent']}%")
         if row.get("rain_14d_mm") is not None:
             parts.append(f"{row['rain_14d_mm']} mm rain in 14 days")
-        if row.get("mosquito_breeding_conditions"):
-            parts.append(f"mosquito-breeding conditions {row['mosquito_breeding_conditions']}")
         if parts:
             lines.append(f"Measured weather at {row.get('location', 'their location')} on {day}: " + ", ".join(parts))
+        assessment = assess_risks(days.get("daily_environment_data", {}), today=today)
+        elevated = [r for r in assessment["risks"] if r["level"] != "low"]
+        if elevated:
+            lines.append(
+                "Environment risks (measured = today's readings; estimate = weather/season/region, not outbreak reports): "
+                + "; ".join(f"{r['title']} {r['level']} [{r['kind']}] ({', '.join(r['why'][:2])})" for r in elevated[:6])
+            )
+        low = [r["title"] for r in assessment["risks"] if r["level"] == "low"]
+        if low:
+            lines.append("Low right now: " + ", ".join(low))
+        notices = notices_for(cached_notices(), row.get("country"))
+        if notices:
+            lines.append("WHO outbreak notices for their country: " + "; ".join(f"{n['title']} ({n['date']})" for n in notices[:3]))
 
     fitness = days.get("daily_fitness_data", {})
     measured_sleep = [(d, r["sleep_hours"]) for d, r in sorted(fitness.items()) if r.get("sleep_hours") is not None]
@@ -80,14 +96,15 @@ def collection_status(store: CollectedStore, user_id: int, *, today: date | None
     today = today or date.today()
     since = (today - timedelta(days=30)).isoformat()
     days = store.read_days(user_id, since)
-    env = _latest(days.get("daily_environment_data", {}))
+    env_days = days.get("daily_environment_data", {})
+    env = _latest(env_days)
     fitness = _latest({d: r for d, r in days.get("daily_fitness_data", {}).items() if r})
     calendar = _latest(days.get("daily_calendar_data", {}))
     collected_days = sorted({d for by_date in days.values() for d in by_date})
     return {
         "connections": store.connections(user_id),
         "recent_items": store.recent_items(user_id, limit=15),
-        "environment": {"date": env[0], **env[1], "alerts": environment_alerts(env[1])} if env else None,
+        "environment": {"date": env[0], **env[1], "alerts": top_alerts(assess_risks(env_days, today=today))} if env else None,
         "latest_health": {"date": fitness[0], **fitness[1]} if fitness else None,
         "latest_calendar": {"date": calendar[0], **calendar[1]} if calendar else None,
         "days_collected_30d": len(collected_days),

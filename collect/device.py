@@ -54,6 +54,16 @@ class HealthDay(_Day):
     body_temperature_c: float | None = Field(default=None, ge=30, le=45)
     weight_kg: float | None = Field(default=None, ge=2, le=400)
     hydration_ml: float | None = Field(default=None, ge=0, le=20_000)
+    # Read when a device or app writes them to Health Connect (BP cuff, glucometer, smart scale…).
+    systolic_mmhg: float | None = Field(default=None, ge=50, le=260)
+    diastolic_mmhg: float | None = Field(default=None, ge=30, le=180)
+    blood_glucose_mg_dl: float | None = Field(default=None, ge=20, le=700)
+    body_fat_percent: float | None = Field(default=None, ge=2, le=75)
+    vo2_max: float | None = Field(default=None, ge=5, le=100)
+    nutrition_kcal: float | None = Field(default=None, ge=0, le=15_000)
+    floors_climbed: float | None = Field(default=None, ge=0, le=1_000)
+    period_day: bool | None = None
+    menstrual_flow: Literal["light", "medium", "heavy"] | None = None
 
 
 class CalendarDay(_Day):
@@ -71,10 +81,16 @@ class ScreenDay(_Day):
     screen_minutes: float = Field(ge=0, le=24 * 60)
     late_night_minutes: float = Field(default=0, ge=0, le=24 * 60)  # 00:00-05:00
     longest_session_minutes: float | None = Field(default=None, ge=0, le=24 * 60)
+    unlocks: int | None = Field(default=None, ge=0, le=2000)
+    # Longest screen-off stretch in the night ending that morning: a sleep estimate when no
+    # wearable is worn. Kept apart from measured sleep so it never overwrites a band's data.
+    quiet_start: Clock | None = None
+    quiet_end: Clock | None = None
+    quiet_minutes: float | None = Field(default=None, ge=0, le=24 * 60)
 
 
 class DevicePayload(BaseModel):
-    source: Literal["health_connect", "apple_health", "calendar", "screen_time"]
+    source: Literal["health_connect", "apple_health", "calendar", "screen_time", "band"]
     health: list[HealthDay] = Field(default_factory=list, max_length=60)
     calendar: list[CalendarDay] = Field(default_factory=list, max_length=60)
     screen: list[ScreenDay] = Field(default_factory=list, max_length=60)
@@ -131,6 +147,20 @@ def map_device_payload(payload: DevicePayload) -> dict[str, dict[str, dict[str, 
             body_weight_kg=day.weight_kg,
             water_ml=round(day.hydration_ml) if day.hydration_ml is not None else None,
             water_intake_liters=round(day.hydration_ml / 1000, 2) if day.hydration_ml is not None else None,
+            blood_pressure=(
+                f"{round(day.systolic_mmhg)}/{round(day.diastolic_mmhg)} mmHg"
+                if day.systolic_mmhg is not None and day.diastolic_mmhg is not None
+                else None
+            ),
+            systolic_mmhg=round(day.systolic_mmhg) if day.systolic_mmhg is not None else None,
+            diastolic_mmhg=round(day.diastolic_mmhg) if day.diastolic_mmhg is not None else None,
+            blood_glucose_mg_dl=round(day.blood_glucose_mg_dl) if day.blood_glucose_mg_dl is not None else None,
+            body_fat_percent=round(day.body_fat_percent, 1) if day.body_fat_percent is not None else None,
+            vo2_max=round(day.vo2_max, 1) if day.vo2_max is not None else None,
+            nutrition_kcal=round(day.nutrition_kcal) if day.nutrition_kcal is not None else None,
+            floors_climbed=round(day.floors_climbed) if day.floors_climbed is not None else None,
+            period_day=day.period_day,
+            menstrual_flow=day.menstrual_flow,
         )
 
     for day in payload.calendar:
@@ -157,6 +187,10 @@ def map_device_payload(payload: DevicePayload) -> dict[str, dict[str, dict[str, 
             late_night_usage=day.late_night_minutes >= 20,
             late_night_minutes=round(day.late_night_minutes),
             continuous_usage_minutes=round(day.longest_session_minutes) if day.longest_session_minutes is not None else None,
+            unlocks=day.unlocks,
+            phone_sleep_hours=round(day.quiet_minutes / 60, 2) if day.quiet_minutes else None,
+            phone_sleep_start=_clock(day.quiet_start),
+            phone_sleep_end=_clock(day.quiet_end),
         )
 
     return {table: by_date for table, by_date in rows.items() if any(by_date.values())}

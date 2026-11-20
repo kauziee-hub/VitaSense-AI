@@ -35,7 +35,16 @@
         "android.permission.health.READ_OXYGEN_SATURATION",
         "android.permission.health.READ_RESPIRATORY_RATE",
         "android.permission.health.READ_WEIGHT",
-        "android.permission.health.READ_HYDRATION"
+        "android.permission.health.READ_HYDRATION",
+        "android.permission.health.READ_BODY_TEMPERATURE",
+        "android.permission.health.READ_BLOOD_PRESSURE",
+        "android.permission.health.READ_BLOOD_GLUCOSE",
+        "android.permission.health.READ_BODY_FAT",
+        "android.permission.health.READ_VO2_MAX",
+        "android.permission.health.READ_NUTRITION",
+        "android.permission.health.READ_FLOORS_CLIMBED",
+        "android.permission.health.READ_MENSTRUATION",
+        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
       ],
       "blockedPermissions": [
         "android.permission.WRITE_CALENDAR",
@@ -95,12 +104,14 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 26
+            "minSdkVersion": 26,
+            "extraProguardRules": "# WorkManager (expo-background-task) builds its Room database by reflection. Room 2.6 keeps the class\n# but not its constructor, which R8 full mode then strips, crashing the release app at startup.\n-keep class * extends androidx.room.RoomDatabase { <init>(); }"
           }
         }
       ],
       "expo-secure-store",
-      "./plugins/with-short-native-build-paths"
+      "./plugins/with-short-native-build-paths",
+      "expo-background-task"
     ],
     "experiments": {
       "typedRoutes": true,

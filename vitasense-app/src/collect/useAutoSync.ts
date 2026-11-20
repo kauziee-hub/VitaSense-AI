@@ -3,6 +3,7 @@ import { AppState } from 'react-native';
 
 import { useSession } from '@/lib/session';
 
+import { startBackgroundSync } from './background';
 import { syncSources } from './sync';
 
 /** Collect from switched-on sources when the app opens and whenever it comes back to the foreground. */
@@ -19,6 +20,8 @@ export function useAutoSync() {
         })
         .catch(() => undefined);
     void run();
+    // Keep syncing while the app is closed (Android / iPhone).
+    void startBackgroundSync();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') void run();
     });

@@ -12,8 +12,8 @@ OUT = Path("assets/art")
 OUT.mkdir(parents=True, exist_ok=True)
 
 # name -> longest side in px (2x the largest on-screen size)
-ORGANS = {"heart": 440, "lungs": 440, "brain": 440, "gut": 440, "kidneys": 440, "immune": 440, "sleep": 440}
-BODY = {"body": 1200}
+ORGANS = {"heart": 440, "lungs": 440, "brain": 440, "gut": 440, "kidneys": 440, "immune": 440, "sleep": 440, "mosquito": 440, "band": 440}
+BODY = {"body-female": 1200, "body-male": 1200}
 
 
 def build(name: str, size: int, pad: float = 0.04) -> None:
@@ -31,4 +31,4 @@ def build(name: str, size: int, pad: float = 0.04) -> None:
 
 
 for name, size in {**ORGANS, **BODY}.items():
-    build(name, size, pad=0.0 if name == "body" else 0.04)
+    build(name, size, pad=0.0 if name.startswith("body") else 0.04)

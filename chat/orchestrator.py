@@ -18,6 +18,7 @@ from typing import Protocol
 from locality.intelligence import build_locality_health_intelligence
 from collect.store import get_collected_store
 from collect.summary import collected_prompt_lines
+from db.demo_seed_data import DEMO_USER_IDS
 from records.store import get_records_store
 from records.summary import build_records_summary, records_prompt_lines
 from state.conversation_store import ConversationStore, conversation_store
@@ -173,14 +174,36 @@ async def handle_chat_message(
     except Exception:
         logger.error("Collected context failed", extra={"user_id": user_id, "session_id": session_id})
 
+    # Sex decides which causes apply (pregnancy and periods vs prostate); the profile sets it.
+    if supabase is not None:
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(lambda: supabase.table("users").select("biological_sex").eq("id", user_id).limit(1).execute()),
+                timeout=5.0,
+            )
+            rows = getattr(response, "data", None) or []
+            sex = rows[0].get("biological_sex") if rows and isinstance(rows[0], dict) else None
+            if sex in ("male", "female"):
+                collected_lines.insert(0, f"Sex: {sex} (only consider causes that apply)")
+        except Exception:
+            pass
+
     system_prompt = build_system_prompt(
         user_profile=user_profile,
         daily_data={
             **daily_data,
-            "locality_health_intelligence": build_locality_health_intelligence(
-                user_id=user_id,
-                user_profile=user_profile,
-                daily_data=daily_data,
+            # Simulated area intelligence is for the built-in demo profiles only; real users get
+            # measured environment data and risk estimates through collected_lines instead.
+            **(
+                {
+                    "locality_health_intelligence": build_locality_health_intelligence(
+                        user_id=user_id,
+                        user_profile=user_profile,
+                        daily_data=daily_data,
+                    )
+                }
+                if user_id in DEMO_USER_IDS
+                else {}
             ),
         },
         hypotheses=state.hypotheses,

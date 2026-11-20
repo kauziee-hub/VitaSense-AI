@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
-import { api, type AppUser, type Forecast, type Health } from './api';
+import { api, type AppUser, type BiologicalSex, type Forecast, type Health } from './api';
 
 const ACTIVE_USER_KEY = 'vitasense.activeUser';
 
@@ -10,6 +10,8 @@ interface SessionValue {
   user: AppUser | null;
   signIn: (user: AppUser) => Promise<void>;
   signOut: () => Promise<void>;
+  /** Saves which body the profile is shown with (on this device at once, then on the server). */
+  setBodySex: (sex: BiologicalSex) => Promise<void>;
   health: Health | null;
   forecast: Forecast | null;
   forecastError: string | null;
@@ -76,6 +78,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await AsyncStorage.setItem(ACTIVE_USER_KEY, JSON.stringify(next)).catch(() => undefined);
   }, []);
 
+  const setBodySex = useCallback(
+    async (sex: BiologicalSex) => {
+      if (!user) return;
+      const next = { ...user, biological_sex: sex };
+      setUser(next);
+      await AsyncStorage.setItem(ACTIVE_USER_KEY, JSON.stringify(next)).catch(() => undefined);
+      await api.updateUser(user.id, { biological_sex: sex }).catch(() => undefined);
+    },
+    [user],
+  );
+
   const signOut = useCallback(async () => {
     setUser(null);
     setForecast(null);
@@ -88,6 +101,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       user,
       signIn,
       signOut,
+      setBodySex,
       health,
       forecast,
       forecastError,
@@ -95,7 +109,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       pendingQuestion,
       setPendingQuestion,
     }),
-    [ready, user, signIn, signOut, health, forecast, forecastError, refreshForecast, pendingQuestion],
+    [ready, user, signIn, signOut, setBodySex, health, forecast, forecastError, refreshForecast, pendingQuestion],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

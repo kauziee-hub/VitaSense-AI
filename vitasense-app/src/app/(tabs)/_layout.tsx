@@ -25,6 +25,8 @@ const NAV: { name: string; href: string; label: string; short: string; icon: Luc
 const HIDDEN_ROUTES = [
   { name: 'report', href: '/report', label: 'Doctor report' },
   { name: 'doctors', href: '/doctors', label: 'Doctors nearby' },
+  { name: 'factors', href: '/factors', label: 'Health factors' },
+  { name: 'band', href: '/band', label: 'Fitness band' },
 ];
 
 export default function TabsLayout() {

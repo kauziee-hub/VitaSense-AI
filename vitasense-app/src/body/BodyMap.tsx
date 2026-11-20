@@ -16,7 +16,7 @@ import Svg, { Defs, Ellipse, RadialGradient, Stop } from 'react-native-svg';
 import { SYSTEMS, type SystemKey } from '@/lib/systems';
 import { color, font, tone as toneMap, toneForScore } from '@/theme/tokens';
 
-import { BODY_ART, BODY_ASPECT, SYSTEM_LOOK } from './art';
+import { BODY, type BodySex, SYSTEM_LOOK } from './art';
 
 type Scores = Partial<Record<SystemKey, number | null>>;
 
@@ -32,16 +32,20 @@ export function BodyMap({
   scores = {},
   zoom = 1,
   callout = true,
+  sex = 'female',
 }: {
   height: number;
+  /** Which body render to show; the profile chooses it. */
+  sex?: BodySex;
   selected: SystemKey;
   onSelect?: (key: SystemKey) => void;
   scores?: Scores;
   zoom?: number;
   callout?: boolean;
 }) {
-  const width = Math.round(height * BODY_ASPECT);
-  const look = SYSTEM_LOOK[selected];
+  const body = BODY[sex];
+  const width = Math.round(height * body.aspect);
+  const look = { ...SYSTEM_LOOK[selected], ...body.place[selected] };
   const reduce = useReducedMotion();
   const [uid] = useState(() => Math.random().toString(36).slice(2, 8));
 
@@ -95,7 +99,7 @@ export function BodyMap({
           <Ellipse cx={width * 0.55} cy={height * 0.03} rx={width * 0.42} ry={height * 0.022} fill={`url(#floor-${uid})`} />
         </Svg>
 
-        <Image source={BODY_ART} style={{ width, height }} contentFit="contain" accessibilityIgnoresInvertColors />
+        <Image source={body.source} style={{ width, height }} contentFit="contain" transition={250} accessibilityIgnoresInvertColors />
 
         {/* Organ glow, tinted with the system's accent and breathing slowly. */}
         <Animated.View
@@ -119,7 +123,7 @@ export function BodyMap({
 
         {/* Hotspots. */}
         {SYSTEMS.map((s) => {
-          const spot = SYSTEM_LOOK[s.key].spot;
+          const spot = body.place[s.key].spot;
           if (!spot) return null;
           const active = s.key === selected;
           const sc = scores[s.key] ?? null;

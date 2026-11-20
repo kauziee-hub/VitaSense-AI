@@ -51,16 +51,39 @@ Before shipping a change: `npm run typecheck` and `npm run lint`.
 ## Automatic data collection
 
 Switched on per source in **Profile → Connected data**. Nothing is collected before that, and
-turning a source off deletes what was collected from it. Sync runs when the app opens and when it
-returns to the foreground (`src/collect/useAutoSync.ts`), at most every 1–6 hours per source.
+turning a source off deletes what was collected from it. Sync runs when the app opens, when it
+returns to the foreground (`src/collect/useAutoSync.ts`), and in the background about every 30
+minutes on Android and iPhone (`src/collect/background.ts`, expo-background-task). Each source
+syncs at most every 30 minutes to 6 hours.
 
-| Source | Where it works | Notes |
-|--------|----------------|-------|
-| Location → weather, air, mosquito conditions | Web, Android, iPhone | Only the area name is stored |
-| Health Connect → sleep, steps, heart rate, HRV, SpO₂, workouts | Android **development build** | Not in Expo Go. Needs Health Connect on the phone |
-| Calendar → daily load, late meetings, travel, exams | Android, iPhone | Counts only; titles never leave the phone |
-| Gmail → food, grocery, pharmacy orders, lab PDFs, tickets | Web, Android, iPhone | Needs Google OAuth client IDs (below) |
+| Source | Where it works | What it fills in |
+|--------|----------------|------------------|
+| Health Connect | Android build | Sleep, steps, distance, floors, workouts, calories, heart rate, resting HR, HRV, SpO₂, breathing rate, body temperature, blood pressure, blood sugar, weight, body fat, VO₂ max, food energy, water, menstrual cycle. Covers Samsung, Fitbit, Mi Fitness, Zepp, Garmin, Google Fit and any BP cuff / glucometer / scale app that writes there |
+| Fitness band (Bluetooth) | Android build | Live heart rate from bands, watches and chest straps that broadcast the standard heart-rate profile; daily average + resting estimate |
+| Phone usage | Android build | Screen time, minutes after midnight, unlocks, and a sleep estimate from the longest overnight screen-off stretch (never overwrites a wearable's sleep) |
+| Delivery app alerts | Android build | Orders from Swiggy, Zomato, Blinkit, Zepto, BigBasket, JioMart, EatSure, Domino's, 1mg, PharmEasy, Netmeds, Apollo 24\|7, Practo notifications. Every other app is ignored |
+| Location | Web, Android, iPhone | Weather, 7 air pollutants, pollen, UV, daylight → air, heat, cold, water-borne, mosquito-borne (Aedes, Anopheles, Culex), respiratory and food-spoilage risk; WHO outbreak notices for the country. Only the area name is stored |
+| Gmail | Web, Android, iPhone | Food, grocery and pharmacy orders, lab report PDFs, tickets. Needs Google OAuth client IDs (below) |
+| Calendar | Android, iPhone | Daily load, late or early events, travel, exams. Counts only; titles never leave the phone |
+| Records | Web, Android, iPhone | Lab reports and prescriptions you photograph or upload |
 | Apple Health | Not yet | Shown as "coming next" in the app |
+
+Phone usage, delivery alerts and the band come from the local native module
+`modules/vitasense-device` (Kotlin, Android only). Usage access and notification access are
+granted by the user in Android settings; the app opens the right page and switches the source on
+when they come back. To test delivery alerts on a debug build, grant access and post one from adb:
+
+```bash
+adb shell cmd notification allow_listener ai.vitasense.app/expo.modules.vitasensedevice.OrderAlertListener
+```
+
+```bash
+adb shell cmd notification post -S bigtext -t "Swiggy" test1 "Your order of Chicken Biryani from Meghana Foods has been delivered"
+```
+
+**Health factors** (`/factors`): every factor that can affect health (70, in 9 groups), what
+VitaSense knows about each, from which source, and one tap to connect what's missing. The
+catalogue lives in the backend (`collect/factors.py`).
 
 ### Google sign-in for Gmail
 

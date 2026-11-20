@@ -209,8 +209,11 @@ class SupabaseCollectedStore:
 
     # ---------- local users: not used when everything is hosted ----------
 
-    def create_user(self, name: str, user_code: str) -> dict[str, Any]:
+    def create_user(self, name: str, user_code: str, biological_sex: str | None = None) -> dict[str, Any]:
         raise RuntimeError("The database is unreachable, so a new profile can't be created right now.")
 
     def list_users(self) -> list[dict[str, Any]]:
         return []
+
+    def update_user(self, user_id: int, changes: dict[str, Any]) -> dict[str, Any] | None:
+        return None

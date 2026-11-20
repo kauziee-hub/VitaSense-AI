@@ -146,29 +146,29 @@ The backend also generates baseline AI profile fields, including:
 - AI risk factors
 - AI lifestyle assessment
 
-### Area Health Map
+### Health factors and environment risks
 
-The Area Health Map uses the backend locality intelligence endpoint with frontend fallback data for offline demos. It is designed to feel like "traffic maps for health."
+`GET /api/v1/user/{user_id}/factors?platform=android&connected=...&sex=male` returns every factor
+that can affect health (70, in 9 groups: body signals, movement, food & drink, substances &
+medicines, air/water/climate, infections around you, routine & mind, medical background, life &
+biology) with its current value, source and status: live, recorded, waiting, connect, on_phone,
+manual or not_tracked. The catalogue is `collect/factors.py`.
 
-It displays:
+Environment risks (`collect/risks.py`) are computed from the user's stored Open-Meteo rows:
 
-- hyperlocal disease intelligence
-- dengue and viral fever activity
-- community symptom clusters
-- environmental hazards
-- drainage, stagnant water, pollution, and heat signals
-- smart food safety intelligence
-- predictive lifestyle risk
+- measured: air pollution against WHO 24-hour limits (PM2.5, PM10, NO₂, O₃, SO₂, CO), heat index,
+  cold, UV, allergens (pollen where measured, dust, mould-friendly humidity);
+- estimates (labelled as such, never presented as outbreak reports): Aedes-borne dengue /
+  chikungunya / Zika, Anopheles-borne malaria and Culex-borne Japanese encephalitis / filariasis
+  (weather suitability × season × regional endemicity), water-borne typhoid / cholera / hepatitis
+  A & E / leptospirosis after heavy rain, respiratory viruses, food spoilage, low sunlight;
+- WHO Disease Outbreak News for the user's country (`collect/outbreaks.py`).
 
-The map includes interactive layers:
+Each risk carries the numbers behind it, what it can cause, what to watch for, how to protect
+yourself and which doctor or test to seek. No medicines are named.
 
-- Disease
-- Symptoms
-- Hazards
-- Food Safety
-- Predictive
-
-No database changes are required for this feature in the current build.
+The older simulated Area Health Map data (`locality/intelligence.py`) is used only for the
+built-in demo profiles; real users get the measured and estimated risks above.
 
 ### Premium UI/UX Polish
 
@@ -282,6 +282,8 @@ db/daily_log_schema_patch.sql
 db/vitasense_data_upgrade.sql
 db/vitasense_data_upgrade_repair.sql
 db/setup_context_enum_repair.sql
+db/vitasense_hosted_storage.sql   # records, medicines, collected data (hosted API)
+db/users_biological_sex.sql       # male / female body map and AI context
 ```
 
 The current local build has been validated against the upgraded schema.

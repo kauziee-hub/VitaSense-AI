@@ -13,7 +13,6 @@ import {
   FileText,
   HeartPulse,
   Lock,
-  Mail,
   MapPin,
   Pill,
   ShieldCheck,
@@ -22,6 +21,8 @@ import {
   Sparkles,
   Stethoscope,
   Wind,
+  Watch,
+  UtensilsCrossed,
 } from 'lucide-react-native';
 import { type ComponentRef, type ReactNode, useEffect, useRef, useState } from 'react';
 import {
@@ -54,16 +55,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SYSTEM_LOOK, type ArtKey } from '@/body/art';
 import { BodyMap } from '@/body/BodyMap';
+import { BodySexChooser } from '@/body/BodySexChooser';
+import { APK_URL } from '@/lib/links';
 import { OrganArt } from '@/dashboard/organs';
-import { api, DEMO_USERS, type AppUser } from '@/lib/api';
+import { api, DEMO_USERS, type AppUser, type BiologicalSex } from '@/lib/api';
 import { useSession } from '@/lib/session';
 import { SYSTEMS, type SystemKey } from '@/lib/systems';
 import { Logo } from '@/shell/Logo';
 import { breakpoint, color, font, pastel, radius, shadow } from '@/theme/tokens';
 import { Badge, Button, Card, Text, type PressState } from '@/ui/primitives';
 
-/** Where the website's "Get the Android app" button points. Set EXPO_PUBLIC_ANDROID_APK_URL for another host. */
-const APK_URL = process.env.EXPO_PUBLIC_ANDROID_APK_URL ?? '/downloads/VitaSense.apk';
 const APP_SCREEN = require('../../assets/marketing/app-home.png');
 
 const IS_WEB = Platform.OS === 'web';
@@ -74,24 +75,26 @@ const SYSTEM_COPY: Record<SystemKey, { watches: string; example: string }> = {
   lungs: { watches: 'air quality, pollen, breathing rate', example: 'AQI 152 near home: throat irritation more likely' },
   gut: { watches: 'food orders, meal timing, water', example: 'Late fried dinners twice this week: acidity risk' },
   mind: { watches: 'screen time, workload, sleep debt', example: 'Back-to-back meetings + 8 h screens: stress load high' },
-  immune: { watches: 'sleep, outbreaks nearby, symptoms', example: 'Dengue cases rising in your area this week' },
+  immune: { watches: 'sleep, infection risk nearby, symptoms', example: 'Warm, wet fortnight: dengue-friendly conditions near you' },
   sleep: { watches: 'sleep length, timing, awakenings', example: '4.5 h last night, 1.7 h below your normal' },
   hydration: { watches: 'water, heat, activity', example: '34°C and 1.2 L water: drink before you feel thirsty' },
 };
 
 const STEPS: { art: ArtKey; title: string; detail: string }[] = [
-  { art: 'heart', title: 'Connect once', detail: 'Switch on health data, location, calendar and order emails. One tap each, then you never type them again.' },
+  { art: 'heart', title: 'Connect once', detail: 'Switch on your band, phone, location, orders and calendar. One tap each, then 70 health factors fill in on their own.' },
   { art: 'brain', title: 'It learns your normal', detail: 'Thirty days of sleep, food, stress, air and outbreaks become your personal baseline, so changes stand out.' },
   { art: 'gut', title: 'Ask when you feel off', detail: 'Describe it in your own words. Get the likely reasons from your data, what to do now, and which doctor to see.' },
 ];
 
 const SOURCES: { icon: LucideIcon; title: string; detail: string }[] = [
-  { icon: HeartPulse, title: 'Sleep, heart & activity', detail: 'From your watch or phone through Health Connect.' },
-  { icon: Wind, title: 'Air, heat & mosquitoes', detail: 'Live air quality and weather where you are.' },
-  { icon: Mail, title: 'Food & medicine orders', detail: 'Swiggy, Zepto, PharmEasy and more, from order emails.' },
+  { icon: HeartPulse, title: 'Watch, band, scale, BP & sugar', detail: 'Sleep, heart, HRV, SpO₂, blood pressure, glucose, weight and cycle through Health Connect.' },
+  { icon: Watch, title: 'Fitness band, live', detail: 'Heart rate straight from your band or chest strap over Bluetooth.' },
+  { icon: Wind, title: 'Air, water & infections', detail: 'Seven air pollutants, heat, UV, pollen, flood-driven water risk, mosquito-borne and flu risk, WHO notices.' },
+  { icon: UtensilsCrossed, title: 'What you order', detail: 'Swiggy, Zomato, Blinkit, Zepto, PharmEasy and more, from order alerts and emails.' },
+  { icon: Smartphone, title: 'Phone habits', detail: 'Screen time, use after midnight, pick-ups, and sleep from when the screen goes dark.' },
   { icon: CalendarDays, title: 'Workload & travel', detail: 'How busy your days are. Titles never leave your phone.' },
-  { icon: Camera, title: 'Reports & prescriptions', detail: 'Photograph them. Values and medicines are read for you.' },
-  { icon: ClipboardCheck, title: 'A 10-second check-in', detail: 'Mood, energy and symptoms in three taps.' },
+  { icon: Camera, title: 'Reports & prescriptions', detail: 'Photograph them, or let lab PDFs arrive by email. Values and medicines are read for you.' },
+  { icon: ClipboardCheck, title: 'A 10-second check-in', detail: 'Mood, symptoms, smoking, alcohol, caffeine: what no sensor can see.' },
 ];
 
 const SAFETY: { icon: LucideIcon; title: string; detail: string; fill: string }[] = [
@@ -114,6 +117,7 @@ export default function WelcomeScreen() {
   const [users, setUsers] = useState<AppUser[] | null>(null);
   const [offline, setOffline] = useState(false);
   const [name, setName] = useState('');
+  const [sex, setSex] = useState<BiologicalSex | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
@@ -139,7 +143,7 @@ export default function WelcomeScreen() {
     setCreating(true);
     setError(null);
     try {
-      await choose(await api.createUser(name.trim()));
+      await choose(await api.createUser(name.trim(), sex));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create the profile');
     } finally {
@@ -210,8 +214,14 @@ export default function WelcomeScreen() {
           style={[styles.input, offline && { opacity: 0.5 }]}
           accessibilityLabel="Your first name"
         />
-        <Button label={creating ? 'Creating…' : 'Start'} disabled={offline || creating || !name.trim()} onPress={() => void create()} />
+        <Button label={creating ? 'Creating…' : 'Start'} disabled={offline || creating || !name.trim() || !sex} onPress={() => void create()} />
       </View>
+      {name.trim().length > 0 && (
+        <View style={{ marginTop: 10, gap: 6 }}>
+          <Text variant="small">Your body map shows</Text>
+          <BodySexChooser value={sex} onChange={setSex} />
+        </View>
+      )}
       {error && (
         <Text variant="small" style={{ marginTop: 8, color: color.risk }}>
           {error}
