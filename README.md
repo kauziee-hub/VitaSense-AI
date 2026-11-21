@@ -284,6 +284,7 @@ db/vitasense_data_upgrade_repair.sql
 db/setup_context_enum_repair.sql
 db/vitasense_hosted_storage.sql   # records, medicines, collected data (hosted API)
 db/users_biological_sex.sql       # male / female body map and AI context
+db/enable_rls_legacy_tables.sql   # block public (anon) access; the API's service-role key is unaffected
 ```
 
 The current local build has been validated against the upgraded schema.
